@@ -6,6 +6,16 @@
 ---
 
 ## 2026-09-13
+- **7.3.5 重启后真机验证全绿 + 清理 `__t` 残留项目 + 下一阶段规划拍板**：
+  - 重启验证：OpenAPI **103 路径**（99+4），`planned-chars` 三端点 + `reentry-material` 全在册；
+    DB `plan_chars` 表已建（12 列全对，`UNIQUE(plan_id,name)` 在册——`PRAGMA index_list` 的
+    origin 在**第 4 列 i[3]**，查错列会误报缺失）；GET planned-chars 200 空列表；
+    GET reentry-material 200（林尘，无数据时 `priority="fallback"` 兜底符合设计）。
+  - `__t` 测试残留项目已删（DELETE 200，级联复核只剩演示项目）。
+  - docs/03 新增 **§7.0.1 接下来规划**：7.5 前端规划页升为下一主线（后端攒了三层能力零入口，
+    撞「零入口病」两连教训；7.3.5 的确认建卡/槽位关联/交接三选一本质是作者拍板）；
+    7.4 放量降为后台并行（斗破余 1471 章分批挂机 + 顺带校准 DORMANT_GAP）；7.5 六步拆解
+    （入口骨架→计划视图→casting 面板→引入单面板→连续性提示→C 档展示）+ 验收门槛。
 - **★ 7.3.5 角色连续性 B 档（新角色引入链路 + 篇间交接差集 + 回归理由材料包，单测 345 全绿）**：
   - **新表 `plan_chars` + `PlannedCharORM`**（`UNIQUE(plan_id, name)`）：计划生成时把 `new_chars`
     落成 pending 引入单——补上"拍板后没人接手、角色永远不在库里"的断环。
