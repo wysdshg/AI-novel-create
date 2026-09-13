@@ -363,8 +363,12 @@ def ingest_chapter(
         logger.warning(f"[ingestion] 向量索引同步跳过: {type(e).__name__}: {e}")
 
     # ---------- 4. 走向卡片推送到对话区 ----------
+    # 2026-09-13 用户拍板下线：默认不再每章自动推「三条路」走向卡片（省心不省链路——
+    # 抽取 prompt 的 next_directions 字段与本推送块代码全保留，恢复只需开配置）。
     if push_directions is None:
-        push_directions = bool(app_config.get(db, app_config.KEY_PUSH_DIRECTIONS, True))
+        # 硬编码兜底也置 False（与 DEFAULTS 保持一致）：即使未来该键被移出 DEFAULTS，
+        # 也不会静默复活自动推送。显式传参 push_directions=True 仍可强制开。
+        push_directions = bool(app_config.get(db, app_config.KEY_PUSH_DIRECTIONS, False))
     dirs = extracted.get("next_directions") or []
     if push_directions and dirs:
         try:

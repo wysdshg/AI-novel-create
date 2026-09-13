@@ -6,6 +6,13 @@
 ---
 
 ## 2026-09-13
+- **走向卡片下线（用户拍板，代码保留可恢复，10 单测全绿）**：`memory.push_directions_to_chat` 默认 True → **False**——
+  每章生成后不再自动推「第N章写完了。接下来我看到三条路…」推荐卡片到章对话线程，也不再让用户看到「额外一次推荐调用」的产物。
+  **零删除**：抽取 prompt 的 `next_directions` 字段、`_render_directions`、`ingestion.py` 推送块全保留，记忆抽取链路不变
+  （走向照常抽、照常进 result，只是不推卡片）。恢复方式：DEFAULTS 改回 True，或设置页 / DB `app_configs` 落
+  `{"key":"memory.push_directions_to_chat","value":true}`。改动：`app_config.py`（默认值+描述）、`ingestion.py`
+  （硬编码兜底同步置 False 防静默复活）、`test_ingest_switches.py`（+2 用例固化默认关与恢复路径，8 旧用例零回归）、
+  docs/02+03+05。**需重启后端生效**。
 - **★ 7.5 篇级批量生成面板 v1.1（用户验收插队拍板，纯前端编排后端零改动，vite build 通过）**：
   - 背景：用户真机拍板确认计划后问"在哪生成小说" → 盘点发现单章生成链路全通但只能一章一章手动点；
     用户拍板需求：流式一章一章生成完这一篇 + 每章保存 + 每章自动开章节对话留痕（方便后续对单章让 AI 改）。

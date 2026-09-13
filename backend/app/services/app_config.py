@@ -48,7 +48,11 @@ DEFAULTS: dict[str, Any] = {
     KEY_INGEST_ENABLED: True,
     KEY_EXTRACT_ENABLED: True,
     KEY_AGGREGATE_OVERVIEW: True,
-    KEY_PUSH_DIRECTIONS: True,
+    # ⬇ 2026-09-13 用户拍板下线：走向卡片不再每章自动推到对话区。
+    #   代码全保留（抽取 prompt 的 next_directions 字段、_render_directions、推送块均未动），
+    #   恢复方式：把此处改回 True，或在设置页 / DB app_configs 落一行
+    #   {"key": "memory.push_directions_to_chat", "value": true} 即刻生效。
+    KEY_PUSH_DIRECTIONS: False,
     KEY_STAGE_EVERY: 10,
     KEY_RECENT_MEMORY_N: 3,
 }
@@ -61,7 +65,7 @@ DESCRIPTIONS: dict[str, str] = {
     KEY_INGEST_ENABLED: "每章生成后自动抽取记忆并推演后续走向",
     KEY_EXTRACT_ENABLED: "摄取时用 LLM 抽取章级记忆（关掉改用规则兜底摘要，省一次调用）",
     KEY_AGGREGATE_OVERVIEW: "摄取时用 LLM 精炼篇级概览（关掉改纯拼接，概览页仍有内容）",
-    KEY_PUSH_DIRECTIONS: "把章后走向建议以卡片形式推送到对话区",
+    KEY_PUSH_DIRECTIONS: "把章后走向建议以卡片形式推送到对话区（2026-09-13 起默认下线，需手动开启）",
     KEY_STAGE_EVERY: "每累积多少章滚动压缩一次阶段摘要",
     KEY_RECENT_MEMORY_N: "注入下一章的最近章级记忆条数",
 }

@@ -153,3 +153,38 @@ def test_empty_content_skips_everything(test_db, chain):
     res = ingestion.ingest_chapter(test_db, pid, ch, extract=True)
     assert res.get("skipped")
     assert len(_mem(test_db, pid)) == 0
+
+
+# ===========================================================================
+# 走向卡片下线（2026-09-13 用户拍板）：默认不推，代码保留，恢复路径可用
+# ===========================================================================
+
+def test_push_directions_default_off(test_db):
+    """走向卡片已下线：DEFAULTS 默认 False，DB 无行时 get() 必须读到 False。
+
+    用户感知：每章生成后对话区不再自动出现「第N章写完了。接下来我看到三条路…」卡片。
+    抽取链路不变（next_directions 字段照常抽、照常落 result），只是不往对话区推。
+    """
+    from app.services import app_config
+
+    assert app_config.DEFAULTS[app_config.KEY_PUSH_DIRECTIONS] is False
+    assert app_config.get(test_db, app_config.KEY_PUSH_DIRECTIONS) is False
+    # describe() 是设置面板数据源，默认值要同步呈现为关
+    meta = {d["key"]: d for d in app_config.describe()}
+    assert meta[app_config.KEY_PUSH_DIRECTIONS]["default"] is False
+
+
+def test_push_directions_reenable_path(test_db, chain):
+    """恢复路径验证：配置落库 True（或显式传参）即可重新启用，无需改代码。"""
+    from app.services import app_config, ingestion
+
+    pid, _aid, ch = chain
+    # ① 配置恢复：落库 True 后 get() 读到 True（DEFAULTS 的 False 被覆盖）
+    app_config.set_value(test_db, app_config.KEY_PUSH_DIRECTIONS, True)
+    assert app_config.get(test_db, app_config.KEY_PUSH_DIRECTIONS) is True
+
+    # ② 链路恢复：显式 push_directions=True 时推送块可达（测试库无模型 → 抽取走
+    #    规则兜底，next_directions 恒空 → 不会真推卡片，但 result 不报错、链路不炸）
+    res = ingestion.ingest_chapter(test_db, pid, ch, extract=False, push_directions=True)
+    test_db.commit()
+    assert "directions_pushed" not in res or res.get("directions_pushed", 0) == 0
