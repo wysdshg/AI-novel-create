@@ -37,7 +37,7 @@
       <el-button
         v-if="locked && rows.length"
         type="success"
-        :disabled="batch.active"
+        :disabled="batch.active || batch.starting"
         @click="startBatch()"
       >
         <el-icon><VideoPlay /></el-icon>
@@ -737,6 +737,7 @@ async function refineRow(row) {
 const batch = reactive({
   active: false,       // 循环进行中
   paused: false,       // 暂停标记：当前章跑完停 / 终止时立即断流
+  starting: false,     // ★ 同步重入锁：从入口到确认弹窗全程持有（防双击/双弹窗导致两个循环并发）
   results: [],         // 与 rows 对齐：null | { _st: preset|running|done|failed, _words, _chapterId, _error, _note }
   currentIndex: -1,
   streamText: '',
@@ -795,42 +796,51 @@ function batchPrompt(row) {
 async function startBatch() {
   if (!novelId.value || !articleId.value) return
   if (!locked.value) return ElMessage.warning('请先「拍板确认」计划，再批量生成')
-  if (batch.active) return
-  const existCount = await existingChapterCount()
-  if (existCount >= rows.value.length) {
-    return ElMessage.info(
-      `本篇计划共 ${rows.value.length} 行，篇内已有 ${existCount} 章 —— 已全部覆盖，无续跑空间`
-    )
-  }
+  // ★ 重入锁必须在任何 await 之前同步置位：
+  //   曾踩坑——检查在确认弹窗之前且 active 尚未置位，连点两次按钮/确认两次弹窗
+  //   会同时放行两个循环 → 同一行生成两遍 → 同章号双章（2026-09-13 真机复现）
+  if (batch.active || batch.starting) return
+  batch.starting = true
   try {
-    await ElMessageBox.confirm(
-      `将按已拍板计划逐章生成第 ${existCount + 1}~${rows.value.length} 行（共 ${rows.value.length - existCount} 章，每章约 3~5 分钟）。` +
-      `生成期间请勿关闭页面或切换篇；已生成的章都保住了，随时可暂停。每章完成后会在该章对话线程留痕。`,
-      '一键生成本篇',
-      { type: 'info', confirmButtonText: '开始生成', cancelButtonText: '先不跑' }
+    const existCount = await existingChapterCount()
+    if (existCount >= rows.value.length) {
+      ElMessage.info(
+        `本篇计划共 ${rows.value.length} 行，篇内已有 ${existCount} 章 —— 已全部覆盖，无续跑空间`
+      )
+      return
+    }
+    try {
+      await ElMessageBox.confirm(
+        `将按已拍板计划逐章生成第 ${existCount + 1}~${rows.value.length} 行（共 ${rows.value.length - existCount} 章，每章约 3~5 分钟）。` +
+        `生成期间请勿关闭页面或切换篇；已生成的章都保住了，随时可暂停。每章完成后会在该章对话线程留痕。`,
+        '一键生成本篇',
+        { type: 'info', confirmButtonText: '开始生成', cancelButtonText: '先不跑' }
+      )
+    } catch {
+      return
+    }
+    batch.results = rows.value.map((_, i) =>
+      i < existCount ? { _st: 'preset', _note: `篇内已有第 ${i + 1} 章` } : null
     )
-  } catch {
-    return
-  }
-  batch.results = rows.value.map((_, i) =>
-    i < existCount ? { _st: 'preset', _note: `篇内已有第 ${i + 1} 章` } : null
-  )
-  batch.paused = false
-  batch.active = true
-  for (let i = existCount; i < rows.value.length; i++) {
-    if (batch.paused) break
-    await generateOne(i)
-  }
-  batch.active = false
-  batch.currentIndex = -1
-  if (batch.paused) {
-    ElMessage.info(`已停止：本次完成 ${batchDoneCount.value} 章。点「续跑本篇」从断点接着跑`)
-  } else if (batchFailedCount.value) {
-    ElMessage.warning(
-      `批量结束：成功 ${batchDoneCount.value} 章，失败 ${batchFailedCount.value} 行（可在面板里单行重试）`
-    )
-  } else {
-    ElMessage.success(`本篇批量生成完成：共 ${batchDoneCount.value} 章，每章对话线程已留痕`)
+    batch.paused = false
+    batch.active = true
+    for (let i = existCount; i < rows.value.length; i++) {
+      if (batch.paused) break
+      await generateOne(i)
+    }
+    if (batch.paused) {
+      ElMessage.info(`已停止：本次完成 ${batchDoneCount.value} 章。点「续跑本篇」从断点接着跑`)
+    } else if (batchFailedCount.value) {
+      ElMessage.warning(
+        `批量结束：成功 ${batchDoneCount.value} 章，失败 ${batchFailedCount.value} 行（可在面板里单行重试）`
+      )
+    } else {
+      ElMessage.success(`本篇批量生成完成：共 ${batchDoneCount.value} 章，每章对话线程已留痕`)
+    }
+  } finally {
+    batch.starting = false
+    batch.active = false
+    batch.currentIndex = -1
   }
 }
 
@@ -889,9 +899,17 @@ async function generateOne(i) {
       batch.results[i] = { _st: 'failed', _error: errMsg || '未产出正文（未落库）' }
     }
   } catch (e) {
-    batch.results[i] = e?.name === 'GenerationStopped'
-      ? { _st: 'failed', _error: '手动停止（未落库）' }
-      : { _st: 'failed', _error: e?.message || String(e) }
+    if (chapterId) {
+      // ★ saved 已收到 = 后端已落库，只是之后流/网络中断 —— 按完成处理并补留痕。
+      //   若标 failed，用户点重试会再生成一遍 → 同计划行双章（2026-09-13 真机踩坑）。
+      batch.results[i] = { _st: 'done', _words: words, _chapterId: chapterId, _note: '网络中断但正文已落库' }
+      await traceToThread(row, chapterId, words)
+      store.loadStructure(novelId.value).catch(() => {})
+    } else if (e?.name === 'GenerationStopped') {
+      batch.results[i] = { _st: 'failed', _error: '手动停止（未落库）' }
+    } else {
+      batch.results[i] = { _st: 'failed', _error: e?.message || String(e) }
+    }
   } finally {
     batch.controller = null
   }
@@ -935,32 +953,47 @@ function stopBatch() {
 }
 
 async function retryOne(i) {
-  if (batch.active) return
-  batch.active = true
-  batch.paused = false
+  if (batch.active || batch.starting) return
+  batch.starting = true
   try {
+    // ★ 重试前先对齐：该行若在篇内已有对应章（上次"失败"实为已落库的幽灵章），
+    //   直接改标完成，绝不重复生成（重复生成 = 同计划行双章）
+    const existCount = await existingChapterCount()
+    if (i < existCount) {
+      batch.results[i] = { _st: 'done', _note: '篇内已有对应章（对齐补记，未重复生成）' }
+      ElMessage.info(`第 ${rows.value[i]?.no || i + 1} 行在篇内已有对应章，已改标完成`)
+      return
+    }
+    batch.active = true
+    batch.paused = false
     await generateOne(i)
   } finally {
     batch.active = false
+    batch.starting = false
     batch.currentIndex = -1
   }
 }
 
 async function retryFailed() {
-  if (batch.active) return
-  const idx = batch.results
-    .map((r, i) => (r?._st === 'failed' ? i : -1))
-    .filter((i) => i >= 0)
-  if (!idx.length) return
+  if (batch.active || batch.starting) return
+  batch.starting = true
   batch.active = true
   batch.paused = false
   try {
-    for (const i of idx) {
+    for (let i = 0; i < rows.value.length; i++) {
       if (batch.paused) break
+      if (batch.results[i]?._st !== 'failed') continue
+      // ★ 每行重试前都重新对齐（前面行的重试会让章数增长，行号随之推进）
+      const existCount = await existingChapterCount()
+      if (i < existCount) {
+        batch.results[i] = { _st: 'done', _note: '篇内已有对应章（对齐补记，未重复生成）' }
+        continue
+      }
       await generateOne(i)
     }
   } finally {
     batch.active = false
+    batch.starting = false
     batch.currentIndex = -1
   }
 }
