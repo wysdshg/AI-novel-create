@@ -717,6 +717,52 @@ class PlanCastingORM(Base):
                                                  onupdate=datetime.utcnow)
 
 
+class PlannedCharORM(Base):
+    """计划的**新角色引入单**（Phase 7.3.5 B 档，2026-09-13）：`new_chars` 的落地表。
+
+    🔴 **补上断掉的一环**（docs/03 §7.3.5）：此前计划里的新角色只住在 plan JSON 的
+    `lines[].new_chars` 里 —— 拍板后没人接手，角色永远不在库里，正文生成时
+    被防幻觉闸门当"查无此人"剔除。本表在计划生成时把 new_chars 落成
+    **pending 引入单**，作者确认后才真正建卡进 `characters`。
+
+    为什么不塞进 `chapter_memories.new_entities`（写后摄取的待确认实体）：
+    那条链按**章节**组织（chapter_id 维度），而计划新角色绑定的是**功能位 +
+    篇内首登场行号** —— 硬塞进去要造伪章节记忆行，语义污染。独立表，两链路互不干扰。
+
+    三条约束（防"人物爆炸"，docs/03 §7.3.5 定稿）：
+    1. `slot` 绑定功能位 —— 与 7.3 casting 的 unmatched 槽位同一条链；
+       **不自动猜绑定**（猜测性映射会误导作者），槽位留空由作者在计划页关联；
+    2. 一篇新角色 **≤3**（`plan_crud.PLANNED_CHAR_LIMIT`），超出的剔除并告警；
+    3. `first_appearance` 必填 = 该角色在计划里**首次出现的行为篇内章号**（自动填），
+       是"第 2 章就用了第 7 章才登场的人"这类自洽校验的数据基础。
+
+    生命周期：generate_plan 时落地（pending）→ 重生成时**只清 pending 行**，
+    confirmed/dismissed 保留（作者已拍过板的意志不因重算而蒸发）→ 作者确认建卡
+    （`status=confirmed`，回链 `character_id`）或忽略（`dismissed`）。
+
+    `first_appearance` 刻意**只存篇内行号**：该章还没写，全局章号无从得知；
+    建卡后真实出场章由写后摄取的 `last_seen_chapter` 派生，两套编号不混用。
+    """
+    __tablename__ = "plan_chars"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "name", name="uq_plan_char_name"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    article_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    slot: Mapped[str | None] = mapped_column(String(60), nullable=True)       # 绑定的 cast 功能位（作者填）
+    slot_desc: Mapped[str | None] = mapped_column(Text, nullable=True)        # 槽位功能说明（快照）
+    first_appearance: Mapped[int] = mapped_column(Integer)                    # 篇内行号（必填，约束③）
+    # pending=待作者确认 / confirmed=已建卡（character_id 回链）/ dismissed=作者忽略
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    character_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 onupdate=datetime.utcnow)
+
+
 class BookAliasORM(Base):
     """书级专名匿名化映射表（Phase 7.1 匿名化归一，2026-09-11 深夜）。
 

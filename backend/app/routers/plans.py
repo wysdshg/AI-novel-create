@@ -7,9 +7,13 @@
 | PUT | `/projects/{pid}/articles/{aid}/plan` | 保存行级编辑（表格直接改） |
 | POST | `…/plan/refine-line` | **AI 只改一行**（其余行原样） |
 | POST | `…/plan/confirm` | 作者拍板（draft → confirmed，此后生成注入本章任务） |
+| GET | `…/planned-chars` | 新角色引入单列表（7.3.5） |
+| PUT | `…/planned-chars/{pc_id}` | 调整引入单（绑槽位/改首登场章/忽略） |
+| POST | `…/planned-chars/{pc_id}/confirm` | 确认建卡进角色库（回链 character_id） |
 
 计划行字段：`{no, beat, summary, new_chars[], recall_chars[], target_words, hook, template_ref}`。
-防幻觉：召回角色经后端校验（查无此人剔除）；新角色只进 `planned_chars`，拍板后走待确认实体。
+防幻觉：召回角色经后端校验（查无此人剔除）；新角色落 `plan_chars` 引入单（≤3、首登场行号自动填），
+作者确认后才建卡 —— 补上"计划新角色 → 角色库"断掉的一环（7.3.5）。
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -36,6 +40,24 @@ class RefineLineBody(BaseModel):
 class SaveLinesBody(BaseModel):
     lines: list[dict]
     notes: str | None = None
+
+
+class PlannedCharUpdateBody(BaseModel):
+    """引入单调整（只改作者给的字段）。"""
+    slot: str | None = None
+    slot_desc: str | None = None
+    first_appearance: int | None = Field(None, ge=1)
+    status: str | None = Field(None, description="pending|dismissed（confirmed 走 confirm 端点）")
+
+
+class PlannedCharConfirmBody(BaseModel):
+    """确认建卡时补充的角色属性（全可选，空了给兜底）。"""
+    role_type: str = ""
+    personality: str = ""
+    background: str = ""
+    talent: str = ""
+    current_level: str = ""
+    brief: str = ""
 
 
 @router.post("/projects/{project_id}/articles/{article_id}/plan/generate",
@@ -80,5 +102,42 @@ def refine_line(project_id: str, article_id: str, body: RefineLineBody,
 def confirm_plan(project_id: str, article_id: str, db: Session = Depends(get_session)):
     try:
         return ok(plan_crud.confirm_plan(db, project_id, article_id))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 新角色引入单（Phase 7.3.5 B 档，2026-09-13）
+# ---------------------------------------------------------------------------
+@router.get("/projects/{project_id}/articles/{article_id}/planned-chars",
+            summary="新角色引入单列表")
+def list_planned_chars(project_id: str, article_id: str,
+                       db: Session = Depends(get_session)):
+    return ok(plan_crud.list_planned_chars(db, project_id, article_id))
+
+
+@router.put("/projects/{project_id}/articles/{article_id}/planned-chars/{pc_id}",
+            summary="调整引入单（绑槽位/改首登场章/忽略）")
+def update_planned_char(project_id: str, article_id: str, pc_id: str,
+                        body: PlannedCharUpdateBody,
+                        db: Session = Depends(get_session)):
+    try:
+        return ok(plan_crud.update_planned_char(
+            db, project_id, article_id, pc_id,
+            slot=body.slot, slot_desc=body.slot_desc,
+            first_appearance=body.first_appearance, status=body.status))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/projects/{project_id}/articles/{article_id}/planned-chars/{pc_id}/confirm",
+             summary="确认引入单 → 建卡进角色库")
+def confirm_planned_char(project_id: str, article_id: str, pc_id: str,
+                         body: PlannedCharConfirmBody,
+                         db: Session = Depends(get_session)):
+    try:
+        return ok(plan_crud.confirm_planned_char(
+            db, project_id, article_id, pc_id,
+            attrs=body.model_dump(exclude_none=True)))
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.orm import (
     ArticleORM, ArticlePlanORM, ChapterMemoryORM, ChapterORM, DiscussionMessageORM,
-    PlanCastingORM, ReferenceDocORM, VolumeORM,
+    PlanCastingORM, PlannedCharORM, ReferenceDocORM, VolumeORM,
 )
 from app.schemas.article import ArticleCreate, ArticleUpdate
 
@@ -91,10 +91,13 @@ def delete_article(db: Session, project_id: str, article_id: str) -> bool:
     # 篇章维度的参考文档（每篇一份的「篇章参考」）
     db.query(ReferenceDocORM).filter_by(project_id=project_id, article_id=article_id).delete(
         synchronize_session=False)
-    # 篇规划与选角（Phase 7.3 ③）：`article_plans` / `plan_castings` 都挂在篇上，
-    # 篇没了它们就是孤儿。⚠️ 必须显式删 —— SQLite 外键约束默认不开（PRAGMA foreign_keys=OFF），
-    # 指望 ON DELETE CASCADE 会静默失效、留一堆指向不存在篇的选角。
+    # 篇规划与选角（Phase 7.3 ③ / 7.3.5）：`article_plans` / `plan_castings` /
+    # `plan_chars` 都挂在篇上，篇没了它们就是孤儿。⚠️ 必须显式删 —— SQLite 外键
+    # 约束默认不开（PRAGMA foreign_keys=OFF），指望 ON DELETE CASCADE 会静默失效、
+    # 留一堆指向不存在篇的孤儿行。
     db.query(PlanCastingORM).filter_by(project_id=project_id, article_id=article_id).delete(
+        synchronize_session=False)
+    db.query(PlannedCharORM).filter_by(project_id=project_id, article_id=article_id).delete(
         synchronize_session=False)
     db.query(ArticlePlanORM).filter_by(project_id=project_id, article_id=article_id).delete(
         synchronize_session=False)

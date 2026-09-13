@@ -15,7 +15,7 @@ from app.models.orm import (
     ForeshadowORM, ChapterORM, DiscussionMessageORM, OutlineORM,
     VolumeORM, ArticleORM, ReferenceDocORM, LocationORM,
     ChapterMemoryORM, StageSummaryORM, DiscussionLoadLogORM,
-    ArticlePlanORM, PlanCastingORM,
+    ArticlePlanORM, PlanCastingORM, PlannedCharORM,
 )
 
 
@@ -93,7 +93,7 @@ _RELATED = [
     ForeshadowORM, ChapterORM, DiscussionMessageORM, OutlineORM,
     VolumeORM, ArticleORM, ReferenceDocORM,
     ChapterMemoryORM, StageSummaryORM, DiscussionLoadLogORM,
-    ArticlePlanORM, PlanCastingORM,
+    ArticlePlanORM, PlanCastingORM, PlannedCharORM,
 ]
 
 

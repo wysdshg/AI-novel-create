@@ -10,6 +10,12 @@
 - `new_chars`（引新角色）→ 只进 `planned_chars`，拍板后走既有的待确认实体机制，不直接写角色库；
 - 未找到模板 → `origin="free"`（自由规划），不硬凑。
 
+Phase 7.3.5（2026-09-13）新增两块，全部**零 LLM 成本**：
+- **新角色引入链路**：`_run_planned_chars` 把 `new_chars` 落成 `plan_chars` 表的
+  pending 引入单（限额 ≤3、首登场行号自动填），作者确认后建卡进角色库；
+- **篇间交接差集**：`carryover_check` 取"上一次写作位置"最后 3 章的角色并集，
+  与本篇计划引用做差集 → **警告**（非报错），让作者三选一（交代离场/安排出场/忽略）。
+
 模型：DeepSeek V4.1 Flash（`thinking disabled`）—— 计划是强语义任务（升档），调用次数少。
 """
 import copy
@@ -18,17 +24,21 @@ import logging
 import uuid
 from datetime import datetime
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.orm import (
-    ArticlePlanORM, ArticleORM, ChapterORM,
-    CharacterORM, ForeshadowORM, VolumeORM,
+    ArticlePlanORM, ArticleORM, ChapterMemoryORM, ChapterORM,
+    CharacterORM, ForeshadowORM, PlannedCharORM, VolumeORM,
 )
 from app.services.plot_import import _ds_post, ds_key, make_usage_cb, parse_json_loose
 from app.services import casting_crud
 from app.services import plot_template_crud as tpl_crud
 
 logger = logging.getLogger(__name__)
+
+# 一篇新角色上限（docs/03 §7.3.5 约束②：LLM 没有成本感，不设限会一篇造五个）
+PLANNED_CHAR_LIMIT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -240,10 +250,8 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
         old.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(old)
-        casting = _run_casting(db, project_id, article_id, lines)
-        return {"plan_id": old.id, "lines": len(lines), "unknown_chars": unknown,
-                "templates": [t["name"] for t in templates],
-                "blocked_dead": blocked_dead, **casting}
+        return _finalize_plan(db, project_id, article_id, old, lines,
+                              unknown, templates, blocked_dead)
 
     o = ArticlePlanORM(
         id=uuid.uuid4().hex,
@@ -261,10 +269,64 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     db.add(o)
     db.commit()
     db.refresh(o)
+    return _finalize_plan(db, project_id, article_id, o, lines,
+                          unknown, templates, blocked_dead)
+
+
+def _finalize_plan(db: Session, project_id: str, article_id: str,
+                   plan: ArticlePlanORM, lines: list[dict],
+                   unknown: list[str], templates: list[dict],
+                   blocked_dead: list[str]) -> dict:
+    """落库后的三连增强（全部容错、绝不拖垮主业务）：
+    向量选角（7.3③）→ 新角色落地（7.3.5）→ 篇间交接差集 + 回归材料预取（7.3.5）。
+    carryover / reentry_materials 同时**存进 plan JSON**（拍板/前端读计划时可见）。
+    """
     casting = _run_casting(db, project_id, article_id, lines)
-    return {"plan_id": o.id, "lines": len(lines), "unknown_chars": unknown,
+    planned = _run_planned_chars(db, plan, lines, casting.get("castings"))
+
+    cast_names = [c["character_name"] for c in (casting.get("castings") or [])
+                  if c.get("character_name")]
+    carry = carryover_check(db, project_id, article_id, lines, cast_names)
+    reentry = _reentry_for_plan(db, project_id, casting.get("castings") or [])
+
+    if carry.get("carryover_names") or reentry:
+        # ⚠️ 深拷贝断开共享引用（7.2 踩坑：new==old → UPDATE 被静默跳过）
+        plan.plan = copy.deepcopy({
+            "lines": lines,
+            "notes": (plan.plan or {}).get("notes") or "",
+            "carryover": carry,
+            "reentry_materials": reentry,
+        })
+        plan.updated_at = datetime.utcnow()
+        db.commit()
+    return {"plan_id": plan.id, "lines": len(lines), "unknown_chars": unknown,
             "templates": [t["name"] for t in templates],
-            "blocked_dead": blocked_dead, **casting}
+            "blocked_dead": blocked_dead, "carryover": carry,
+            **casting, **planned}
+
+
+def _reentry_for_plan(db: Session, project_id: str,
+                      castings: list[dict]) -> list[dict]:
+    """对「蛰伏/离场却被选中」的角色做**回归理由材料包**（7.3.5，确定性预取，零 LLM）。
+
+    谁需要材料 casting 已算（needs_reentry_note）；哪章消失台账已算（last_seen）；
+    缺席期材料 = ①未回收伏笔（收伏笔优于凭空编）②缺席期世界线事件（实体命中）。
+    三步全是确定性查询 —— 用 FC 等于把确定性任务交给不确定性组件（docs/03 定稿）。
+    """
+    out: list[dict] = []
+    for c in castings:
+        if not c.get("needs_reentry_note") or not c.get("character_id"):
+            continue
+        try:
+            m = casting_crud.reentry_material(db, project_id, c["character_id"])
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[plan] 回归材料预取失败 {c.get('character_name')}: "
+                           f"{type(e).__name__}: {e}")
+            continue
+        if m:
+            m["slot"] = c.get("slot")
+            out.append(m)
+    return out
 
 
 def _run_casting(db: Session, project_id: str, article_id: str,
@@ -284,6 +346,225 @@ def _run_casting(db: Session, project_id: str, article_id: str,
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 向量选角失败（不影响计划）: {type(e).__name__}: {e}")
         out["casting_reason"] = f"{type(e).__name__}: {str(e)[:120]}"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 新角色引入链路 + 篇间交接（Phase 7.3.5 B 档，2026-09-13，全零 LLM 成本）
+# ---------------------------------------------------------------------------
+def _run_planned_chars(db: Session, plan: ArticlePlanORM, lines: list[dict],
+                       castings: list[dict] | None = None) -> dict:
+    """把计划里的 `new_chars` 落成 `plan_chars` 表的 **pending 引入单**。
+
+    - 限额 `PLANNED_CHAR_LIMIT`（≤3）：按**首次出现顺序**保留，超出的剔除并告警；
+    - `first_appearance` 自动填 = 首次出现的行为篇内章号（约束③的数据基础）；
+    - 重生成/行编辑后重落时**只清 pending 行**：作者已确认（confirmed，角色已建卡）
+      或已忽略（dismissed）的意志不因重算而蒸发，同名跳过；
+    - `unmatched_slots`：casting 里没配上角色的功能位 —— 与新角色是**同一条链**
+      （槽位没匹配到 → 作者在计划页"新建角色 / 改选现有角色"），但**不自动猜绑定**。
+    整个函数**绝不抛异常**（与 _run_casting 同款纪律：增强能力不拖垮主业务）。
+    """
+    out: dict = {"planned_chars": [], "new_chars_dropped": [],
+                 "unmatched_slots": [], "planned_chars_reason": None}
+    try:
+        # 1. 收集（按首次出现顺序，去重）
+        seen: dict[str, int] = {}
+        for ln in lines:
+            for nm in (ln.get("new_chars") or []):
+                s = str(nm).strip()
+                if s and s not in seen:
+                    seen[s] = int(ln.get("no") or 0)
+        keep = dict(list(seen.items())[:PLANNED_CHAR_LIMIT])
+        out["new_chars_dropped"] = list(seen)[PLANNED_CHAR_LIMIT:]
+
+        # 2. 旧行：pending 清掉重落；confirmed/dismissed 保留（同名跳过）
+        kept_names: set[str] = set()
+        for o in db.query(PlannedCharORM).filter_by(plan_id=plan.id).all():
+            if (o.status or "pending") == "pending":
+                db.delete(o)
+            else:
+                kept_names.add(o.name)
+        now = datetime.utcnow()
+        for name, no in keep.items():
+            if name in kept_names:
+                continue
+            db.add(PlannedCharORM(
+                id=uuid.uuid4().hex,
+                plan_id=plan.id,
+                project_id=plan.project_id,
+                article_id=plan.article_id,
+                name=name,
+                first_appearance=no,
+                status="pending",
+                created_at=now,
+                updated_at=now,
+            ))
+        db.commit()
+
+        # 3. casting 的 unmatched 槽位（给计划页做"新建 / 改选"的关联提示）
+        for c in (castings or []):
+            if not c.get("character_id") and c.get("slot"):
+                out["unmatched_slots"].append(
+                    {"slot": c["slot"], "slot_desc": c.get("slot_desc") or ""})
+
+        out["planned_chars"] = [_planned_to_dict(o) for o in
+                                db.query(PlannedCharORM).filter_by(plan_id=plan.id)
+                                .order_by(PlannedCharORM.first_appearance.asc()).all()]
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.warning(f"[plan] 新角色落地失败（不影响计划）: {type(e).__name__}: {e}")
+        out["planned_chars_reason"] = f"{type(e).__name__}: {str(e)[:120]}"
+    return out
+
+
+def _planned_to_dict(o: PlannedCharORM) -> dict:
+    return {
+        "id": o.id,
+        "name": o.name,
+        "slot": o.slot,
+        "slot_desc": o.slot_desc,
+        "first_appearance": o.first_appearance,
+        "status": o.status,
+        "character_id": o.character_id,
+    }
+
+
+def refresh_planned_chars(db: Session, project_id: str, article_id: str) -> dict:
+    """行编辑（save_lines/refine_line）后重落 pending 引入单（保持与 lines 同步）。"""
+    plan = (db.query(ArticlePlanORM)
+            .filter_by(project_id=project_id, article_id=article_id)
+            .order_by(ArticlePlanORM.updated_at.desc()).first())
+    if plan is None:
+        return {"planned_chars": [], "new_chars_dropped": [],
+                "unmatched_slots": [], "planned_chars_reason": None}
+    lines = (plan.plan or {}).get("lines") or []
+    return _run_planned_chars(db, plan, lines)
+
+
+def list_planned_chars(db: Session, project_id: str, article_id: str) -> list[dict]:
+    """读该篇当前计划的引入单（含 confirmed/dismissed —— 作者的决策历史要可见）。"""
+    plan = (db.query(ArticlePlanORM)
+            .filter_by(project_id=project_id, article_id=article_id)
+            .order_by(ArticlePlanORM.updated_at.desc()).first())
+    if plan is None:
+        return []
+    rows = (db.query(PlannedCharORM)
+            .filter_by(plan_id=plan.id)
+            .order_by(PlannedCharORM.first_appearance.asc()).all())
+    return [_planned_to_dict(o) for o in rows]
+
+
+def update_planned_char(db: Session, project_id: str, article_id: str, pc_id: str, *,
+                        slot: str | None = None,
+                        slot_desc: str | None = None,
+                        first_appearance: int | None = None,
+                        status: str | None = None) -> dict:
+    """作者调整引入单：绑槽位 / 改首登场章 / 忽略（dismiss）。"""
+    o = db.query(PlannedCharORM).filter_by(id=pc_id, project_id=project_id,
+                                           article_id=article_id).first()
+    if o is None:
+        raise RuntimeError("引入单不存在")
+    if slot is not None:
+        o.slot = str(slot).strip() or None
+    if slot_desc is not None:
+        o.slot_desc = str(slot_desc).strip() or None
+    if first_appearance is not None:
+        o.first_appearance = int(first_appearance)
+    if status is not None:
+        if status not in ("pending", "dismissed", "confirmed"):
+            raise RuntimeError(f"未知状态 {status}")
+        o.status = status
+    o.updated_at = datetime.utcnow()
+    db.commit()
+    return _planned_to_dict(o)
+
+
+def confirm_planned_char(db: Session, project_id: str, article_id: str, pc_id: str, *,
+                         attrs: dict | None = None) -> dict:
+    """作者确认引入单 → 真正建卡进 `characters`（补上断掉的一环）。
+
+    复用写后摄取确认的同一套写入纪律：**重名跳过**（同名即同人，重复建卡会让
+    后续注入出现两份互相矛盾的设定）。建卡成功回链 `character_id`、置 confirmed。
+    `first_appearance` 保持篇内行号 —— 全局章号等该章真写完由 last_seen 派生，不猜。
+    """
+    from app.schemas.database import CharacterCreate
+    from app.services import character_crud
+
+    o = db.query(PlannedCharORM).filter_by(id=pc_id, project_id=project_id,
+                                           article_id=article_id).first()
+    if o is None:
+        raise RuntimeError("引入单不存在")
+    if o.status == "confirmed" and o.character_id:
+        return {"character_id": o.character_id, "name": o.name, "status": "confirmed",
+                "skipped": "已确认过（幂等）"}
+    a = attrs or {}
+    exists = (db.query(CharacterORM)
+              .filter_by(project_id=project_id, name=o.name).first())
+    if exists is not None:
+        # 同名角色已在库 —— 不重复建卡，直接回链确认
+        o.status = "confirmed"
+        o.character_id = exists.id
+        o.updated_at = datetime.utcnow()
+        db.commit()
+        return {"character_id": exists.id, "name": o.name, "status": "confirmed",
+                "skipped": "同名角色已存在（已直接回链）"}
+    fields = {
+        "name": o.name,
+        "role_type": str(a.get("role_type") or "配角"),
+        "personality": str(a.get("personality") or ""),
+        "background": str(a.get("background") or ""),
+        "talent": str(a.get("talent") or ""),
+        "current_level": str(a.get("current_level") or ""),
+        "brief": str(a.get("brief") or (f"补「{o.slot}」功能位的新角色"
+                                        if o.slot else "")),
+    }
+    ch = character_crud.create_character(db, project_id, CharacterCreate(**fields))
+    o.status = "confirmed"
+    o.character_id = ch.id
+    o.updated_at = datetime.utcnow()
+    db.commit()
+    return {"character_id": ch.id, "name": o.name, "status": "confirmed"}
+
+
+def carryover_check(db: Session, project_id: str, article_id: str,
+                    lines: list[dict], casting_names: list[str]) -> dict:
+    """**篇间交接差集**（7.3.5 B 档，零 LLM）：警告非报错。
+
+    1. 定位"上一次写作位置"：**非本篇**的全局最大 `chapter_no` 章节记忆
+       （网文顺序写作，全局最新章 ≈ 上一篇末尾；排除本篇防自指）；
+    2. 取其往前共 3 章记忆的 `characters` 并集 = **上场遗留名单**；
+    3. 差集 = 遗留名单 − 本篇引用（recall_chars ∪ new_chars ∪ casting 选角）
+       → 名单里的人本篇"人间蒸发" → 列出警告，让作者三选一：
+       交代离场 / 安排出场 / 忽略。**绝不阻塞流程**。
+    """
+    out: dict = {"carryover_names": [], "last_chapters": [], "from_article_id": None}
+    try:
+        mems = (db.query(ChapterMemoryORM)
+                .filter_by(project_id=project_id)
+                .filter(or_(ChapterMemoryORM.article_id.is_(None),
+                            ChapterMemoryORM.article_id != article_id))
+                .order_by(ChapterMemoryORM.chapter_no.desc())
+                .limit(3).all())
+        if not mems:
+            return out
+        out["last_chapters"] = [m.chapter_no for m in mems]
+        out["from_article_id"] = mems[0].article_id
+        legacy: list[str] = []
+        for m in mems:
+            for n in (m.characters or []):
+                s = str(n).strip()
+                if s and s not in legacy:
+                    legacy.append(s)
+        referred: set[str] = set(casting_names or [])
+        for ln in lines:
+            for k in ("recall_chars", "new_chars"):
+                for n in (ln.get(k) or []):
+                    s = str(n).strip()
+                    if s:
+                        referred.add(s)
+        out["carryover_names"] = [n for n in legacy if n not in referred]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plan] 篇间交接校验失败（不影响计划）: {type(e).__name__}: {e}")
     return out
 
 
@@ -332,7 +613,10 @@ def refine_line(db: Session, project_id: str, article_id: str, *,
     plan.plan = copy.deepcopy({"lines": lines, "notes": (plan.plan or {}).get("notes") or ""})
     plan.updated_at = datetime.utcnow()
     db.commit()
-    return {"line": new_line, "origin": plan.origin}
+    # 7.3.5：行变了，pending 引入单同步重落（confirmed/dismissed 不动）
+    planned = refresh_planned_chars(db, project_id, article_id)
+    return {"line": new_line, "origin": plan.origin,
+            "new_chars_dropped": planned.get("new_chars_dropped") or []}
 
 
 def confirm_plan(db: Session, project_id: str, article_id: str) -> dict:
@@ -383,7 +667,10 @@ def save_lines(db: Session, project_id: str, article_id: str, *,
         {"lines": fixed, "notes": notes if notes is not None else (plan.plan or {}).get("notes") or ""})
     plan.updated_at = datetime.utcnow()
     db.commit()
-    return {"plan_id": plan.id, "lines": len(fixed)}
+    # 7.3.5：行变了，pending 引入单同步重落（confirmed/dismissed 不动）
+    planned = refresh_planned_chars(db, project_id, article_id)
+    return {"plan_id": plan.id, "lines": len(fixed),
+            "new_chars_dropped": planned.get("new_chars_dropped") or []}
 
 
 def upsert_draft_for_article(db: Session, project_id: str, article_id: str) -> dict:

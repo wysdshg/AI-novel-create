@@ -30,7 +30,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.orm import (
-    ArticlePlanORM, ChapterMemoryORM, CharacterORM, PlanCastingORM, PlotTemplateORM,
+    ArticlePlanORM, ChapterMemoryORM, CharacterORM, ForeshadowORM,
+    PlanCastingORM, PlotTemplateORM,
 )
 from app.services import plot_template_crud as tpl_crud
 
@@ -495,6 +496,78 @@ def check_appearances(db: Session, project_id: str, lines: list[dict]) -> dict:
             kept.append(n)
         ln["recall_chars"] = kept
     return {"blocked_dead": blocked, "needs_reentry_note": need_note}
+
+
+# ---------------------------------------------------------------------------
+# 7.5 回归理由材料包（7.3.5，确定性预取，零 LLM）
+# ---------------------------------------------------------------------------
+def reentry_material(db: Session, project_id: str, character_id: str, *,
+                     max_digest: int = 20) -> dict:
+    """为「蛰伏/离场角色被召回」预取**回归理由材料**（docs/03 §7.3.5 定稿）。
+
+    三步全是确定性查询（**不走 FC** —— 把确定性任务交给不确定性组件是同一个坑）：
+    1. **谁需要材料**：调用方已按 `needs_reentry_note` 筛过；
+    2. **他哪章消失**：台账 `last_seen_chapter`（派生字段，可重算可验证）；
+    3. **缺席期材料**，按方案认可的**来源优先级**：
+       ① 未回收伏笔（`related_ids` 挂了本角色，或描述里点名）—— 把"编理由"变成
+         "收伏笔"，埋-收结构天然成立，几乎零额外成本；
+       ② 缺席期**世界线事件**（章节记忆里点名本角色的章 = 他缺席时世界在发生什么）
+         + 逐章摘要 digest（封顶 `max_digest` 条防爆炸）；
+       ③ 两者皆无 → `fallback`（纯新编，质量最差，如实标注不伪装）。
+
+    ⚠️ "被人提到/回忆"不算出场（用户定稿）—— 但**正因为不算出场**，缺席期里
+    提到他的章节恰恰是"世界线还挂着他"的证据，作为回归材料正合适。
+    """
+    c = db.query(CharacterORM).filter_by(id=character_id,
+                                         project_id=project_id).first()
+    if c is None:
+        return {}
+    last = c.last_seen_chapter
+
+    # ① 未回收伏笔：related_ids 挂了本角色，或描述里点名（两路都查，互为补充）
+    foreshadows: list[dict] = []
+    try:
+        rows = (db.query(ForeshadowORM)
+                .filter_by(project_id=project_id, enabled=True)
+                .filter(ForeshadowORM.status != "resolved").all())
+        for f in rows:
+            if character_id in (f.related_ids or []) or \
+                    (c.name and c.name in (f.description or "")):
+                foreshadows.append({"id": f.id, "description": f.description,
+                                    "buried_chapter": f.buried_chapter})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[casting] 伏笔预取失败: {type(e).__name__}: {e}")
+
+    # ② 缺席期：实体命中章（世界线事件）+ 逐章摘要 digest
+    world_events: list[dict] = []
+    arc_digest: list[dict] = []
+    try:
+        q = db.query(ChapterMemoryORM).filter_by(project_id=project_id)
+        if last is not None:
+            q = q.filter(ChapterMemoryORM.chapter_no > int(last))
+        mems = q.order_by(ChapterMemoryORM.chapter_no.asc()).all()
+        for m in mems:
+            s = m.summary or ""
+            if c.name and (c.name in (m.characters or []) or c.name in s):
+                world_events.append({"chapter_no": m.chapter_no, "title": m.title,
+                                     "summary": s[:200]})
+            if len(arc_digest) < max_digest:
+                arc_digest.append({"chapter_no": m.chapter_no, "summary": s[:120]})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[casting] 缺席期预取失败: {type(e).__name__}: {e}")
+
+    priority = "foreshadow" if foreshadows else (
+        "world_events" if world_events else "fallback")
+    return {
+        "character_id": c.id,
+        "name": c.name,
+        "status": c.status or "alive",
+        "last_seen_chapter": last,
+        "foreshadows": foreshadows,
+        "world_events": world_events[:10],
+        "arc_digest": arc_digest,
+        "priority": priority,
+    }
 
 
 # ---------------------------------------------------------------------------

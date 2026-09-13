@@ -6,6 +6,34 @@
 ---
 
 ## 2026-09-13
+- **★ 7.3.5 角色连续性 B 档（新角色引入链路 + 篇间交接差集 + 回归理由材料包，单测 345 全绿）**：
+  - **新表 `plan_chars` + `PlannedCharORM`**（`UNIQUE(plan_id, name)`）：计划生成时把 `new_chars`
+    落成 pending 引入单——补上"拍板后没人接手、角色永远不在库里"的断环。
+    **独立表而非塞 `chapter_memories.new_entities`**（那条链按 chapter 维度组织，计划新角色绑的是
+    功能位 + 篇内行号，硬塞要造伪记忆行）。
+  - **三条防人物爆炸约束**：① ≤3/篇（`PLANNED_CHAR_LIMIT`，超出剔除并报 `new_chars_dropped`）；
+    ② 必绑功能位但**不自动猜绑定**（`unmatched_slots` 报告由作者关联）；③ `first_appearance`
+    篇内行号必填（该章还没写、全局章号无从得知——建卡后由写后摄取 `last_seen_chapter` 派生，两套编号不混用）。
+  - **确认建卡 `confirm_planned_char`**：建 `characters` 回链 `character_id` 置 confirmed；
+    **重名跳过不重复建卡**（同名即同人）；幂等；brief 兜底功能位语义。
+    **重落只清 pending**：confirmed/dismissed 是作者已表达的意志，重算不蒸发。
+  - **篇间交接差集 `carryover_check`**：上次写作位置 = 非本篇的全局最大 chapter_no 记忆（顺序写作假设），
+    前 3 条 characters 并集 = 遗留名单；差集 = 遗留 − (recall ∪ new ∪ 选角)，**警告非报错**；
+    防自指 `or_(article_id.is_(None), article_id != 本篇)`。
+  - **回归理由材料包 `casting_crud.reentry_material`**：确定性预取**不走 FC**（三步全确定，§Phase 6 边界约束）；
+    优先级代码化 `priority`：①未回收伏笔（related_ids 含 cid 或 description 含名）→ ②缺席期世界线
+    → ③纯新编兜底。把"编理由"变成"收伏笔"。
+  - **`_finalize_plan` 统一生成尾部**（选角 → 新角色落地 → 交接差集 → 回归材料），全程容错不拖垮主业务；
+    carryover/reentry 存 plan JSON 时 **deepcopy 断共享引用**（7.2 坑）。
+  - **API +6**：`planned-chars` 列表/更新/确认 3 端点 + `reentry-material` 端点；
+    级联删除三入口（篇/卷/项目）接入 `plan_chars`；app 装配 **168 路由**（+4，planned-chars 3 + reentry 1）。
+  - **测试**：`test_continuity.py` 新增 **21 例**（落地/限额/重落保留/建卡回链/同名/幂等/校验/不自动绑定/
+    差集四态/回归材料三级优先/级联/UNIQUE），全量 **345 全绿**。
+  - **踩坑**：Edit 在两个 ORM 类之间插新类时误删 `class BookAliasORM(Base):` 声明行，其类体被吸收进
+    `PlannedCharORM`（后到的 `__tablename__` 覆盖前者），8 测试连带失败——插入类时 old/new 边界必须带上
+    下一个 `class` 行；`create_character` 返回 ORM 非 dict（`ch["id"]` → `ch.id`）。
+  - **诚实边界**：端到端效果待真实长篇（当前库无章节数据，逻辑靠单测验证）；"久缺席"阈值未标定。
+  - **需重启后端**生效（新表 `plan_chars` + 6 新路由）。
 - **★ 7.3 角色向量选角全量落地（②③④⑤⑥，单测 324 全绿）**：
   - **槽位向量库**：`plot_template_crud` 新增 `SOURCE_TYPE_CAST="plot_cast"`，与模板块**分开索引、分开清理**
     （混一个 source_type 会被 beat 文本淹没）；`chunk_idx == cast 数组下标` 直接反查；
