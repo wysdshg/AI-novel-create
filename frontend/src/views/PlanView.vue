@@ -24,13 +24,24 @@
         placeholder="选择篇"
         style="width: 260px"
         :disabled="!novelId"
-        @change="loadAll"
+        @change="onArticleChange"
       >
         <el-option v-for="a in articleOptions" :key="a.id" :label="a.label" :value="a.id" />
       </el-select>
 
       <el-button type="primary" :disabled="!novelId || !articleId" @click="genVisible = true">
         <el-icon><MagicStick /></el-icon> 生成计划
+      </el-button>
+
+      <!-- 7.5 批量生成入口：拍板后才亮 -->
+      <el-button
+        v-if="locked && rows.length"
+        type="success"
+        :disabled="batch.active"
+        @click="startBatch()"
+      >
+        <el-icon><VideoPlay /></el-icon>
+        {{ batchResumeLabel }}
       </el-button>
 
       <template v-if="plan">
@@ -53,6 +64,89 @@
     </el-empty>
 
     <template v-else>
+      <!-- 批量生成面板（7.5）：逐章循环生成整篇，每章落库 + 章对话线程留痕 -->
+      <div v-if="batchVisible" class="pv-section pv-batch">
+        <div class="pv-section-head">
+          <h3 class="pv-section-title">
+            本篇批量生成（{{ batchDoneCount }} / {{ rows.length }} 章）
+            <el-tag v-if="batch.active" type="primary" effect="light" size="small">
+              {{ batch.paused ? '将在本章完成后暂停' : '生成中…' }}
+            </el-tag>
+            <el-tag v-else-if="batchPausedTag" type="warning" effect="plain" size="small">已暂停</el-tag>
+          </h3>
+          <div class="pv-section-actions">
+            <el-button v-if="batch.active" size="small" :disabled="batch.paused" @click="pauseBatch">
+              暂停（本章跑完停）
+            </el-button>
+            <el-button
+              v-if="batch.active || batchPausedTag"
+              size="small"
+              type="danger"
+              plain
+              @click="stopBatch"
+            >
+              终止
+            </el-button>
+            <el-button v-if="batchFailedCount" size="small" type="warning" plain :disabled="batch.active"
+                       @click="retryFailed">
+              重试失败（{{ batchFailedCount }}）
+            </el-button>
+          </div>
+        </div>
+
+        <el-table :data="batchRows" size="small" border class="pv-table">
+          <el-table-column label="#" width="46" align="center">
+            <template #default="{ row }">{{ row.no }}</template>
+          </el-table-column>
+          <el-table-column label="节拍" width="130">
+            <template #default="{ row }">{{ row.beat || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="150">
+            <template #default="{ row }">
+              <el-tag v-if="row._st === 'preset'" size="small" type="info" effect="plain">已有（跳过）</el-tag>
+              <el-tag v-else-if="row._st === 'running'" size="small" type="primary" effect="light">生成中…</el-tag>
+              <el-tag v-else-if="row._st === 'done'" size="small" type="success" effect="plain">
+                完成{{ row._words ? ` · ${row._words} 字` : '' }}
+              </el-tag>
+              <el-tooltip v-else-if="row._st === 'failed'" :content="row._error || '生成失败'" placement="top">
+                <el-tag size="small" type="danger" effect="plain">失败（悬停看原因）</el-tag>
+              </el-tooltip>
+              <span v-else class="pv-batch-idle">待生成</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="备注" min-width="180">
+            <template #default="{ row }">
+              <span v-if="row._note" class="pv-batch-note">{{ row._note }}</span>
+              <span v-else-if="row._st === 'done' && row._chapterId" class="pv-batch-note">已存入本篇 · 章对话已留痕</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" align="center">
+            <template #default="{ $index }">
+              <el-button
+                v-if="$index === batch.currentIndex && batch.active"
+                size="small" text type="danger" @click="stopBatch"
+              >
+                停止本章
+              </el-button>
+              <el-button
+                v-else-if="['failed'].includes(batchRows[$index]._st) && !batch.active"
+                size="small" text type="primary" @click="retryOne($index)"
+              >
+                重试本行
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <!-- 当前章流式正文 -->
+        <div v-if="batch.active && batch.streamText" class="pv-batch-stream">
+          <div class="pv-batch-stream-title">
+            正在生成：第 {{ currentRow?.no }} 行 · {{ currentRow?.beat || '' }}
+          </div>
+          <pre ref="streamBox" class="pv-batch-stream-text">{{ batch.streamText }}</pre>
+        </div>
+      </div>
+
       <!-- 连续性警告（7.3.5） -->
       <el-alert
         v-if="carryoverNames.length"
@@ -421,12 +515,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, reactive } from 'vue'
+import { computed, onMounted, ref, reactive, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useProjectStore } from '@/store/project'
 import { planApi } from '@/api/plan'
 import { castingApi } from '@/api/casting'
 import { characterApi } from '@/api/database'
+import { chapterApi, generateChapterStream } from '@/api/chapter'
+import { discussionAppend } from '@/api/discussion'
 
 const store = useProjectStore()
 
@@ -539,6 +635,10 @@ async function loadAll() {
 }
 
 async function onNovelChange(id) {
+  if (guardBatchBusy()) {
+    novelId.value = store.currentNovelId   // 回弹选择器
+    return
+  }
   if (id !== store.currentNovelId) {
     await store.selectNovel(id)
   }
@@ -626,6 +726,242 @@ async function refineRow(row) {
     ElMessage.success(`第 ${row.no} 行已按要求修改`)
   } catch { /* 拦截器已报错 */ } finally {
     row._refining = false
+  }
+}
+
+// —— 批量生成（7.5）：逐章跑完整篇，每章落库 + 章对话线程留痕 ——
+// 复用三条已有链路，后端零改动：
+//   ① 单章生成 SSE（article_id + 空 chapter_id 模式 → 后端按「本篇最大序号+1」自动接续章号）
+//   ② confirmed 计划自动注入上下文（layer_chapter_plan 按 chapter_no 对行，P_CRITICAL 永不裁剪）
+//   ③ discussionAppend 往指定章线程写消息（discussion_messages 落 SQLite，永久保存）
+const batch = reactive({
+  active: false,       // 循环进行中
+  paused: false,       // 暂停标记：当前章跑完停 / 终止时立即断流
+  results: [],         // 与 rows 对齐：null | { _st: preset|running|done|failed, _words, _chapterId, _error, _note }
+  currentIndex: -1,
+  streamText: '',
+  controller: null,    // 当前章的 AbortController（终止本章用）
+})
+const streamBox = ref(null)
+const batchVisible = computed(() => batch.results.some(Boolean))
+const batchPausedTag = computed(() => !batch.active && batch.paused)
+const batchDoneCount = computed(() =>
+  batch.results.filter((r) => r?._st === 'done' || r?._st === 'preset').length
+)
+const batchFailedCount = computed(() => batch.results.filter((r) => r?._st === 'failed').length)
+const currentRow = computed(() => rows.value[batch.currentIndex] || null)
+const batchRows = computed(() =>
+  rows.value.map((r, i) => ({ no: r.no, beat: r.beat, ...(batch.results[i] || {}) }))
+)
+const batchResumeLabel = computed(() => {
+  const done = batch.results.filter((r) => r?._st === 'done' || r?._st === 'preset').length
+  return done > 0
+    ? `续跑本篇（${done}/${rows.value.length}）`
+    : `一键生成本篇（${rows.value.length} 章）`
+})
+
+function guardBatchBusy() {
+  if (batch.active) {
+    ElMessage.warning('批量生成进行中，请先暂停/终止再切换')
+    return true
+  }
+  return false
+}
+
+async function onArticleChange() {
+  if (guardBatchBusy()) return
+  loadAll()
+}
+
+async function existingChapterCount() {
+  try {
+    const list = await chapterApi.list(novelId.value, { article_id: articleId.value })
+    const arr = Array.isArray(list) ? list : (list?.items || [])
+    return arr.length
+  } catch {
+    return 0
+  }
+}
+
+function batchPrompt(row) {
+  const parts = []
+  if (row.beat) parts.push(`标题：${row.beat}`)
+  parts.push(`按已确认的篇计划写作本篇第 ${row.no}/${rows.value.length} 章`)
+  if (row.summary) parts.push(`剧情要点：${row.summary}`)
+  if (row.hook) parts.push(`章末钩子：${row.hook}`)
+  return parts.join('\n')
+}
+
+async function startBatch() {
+  if (!novelId.value || !articleId.value) return
+  if (!locked.value) return ElMessage.warning('请先「拍板确认」计划，再批量生成')
+  if (batch.active) return
+  const existCount = await existingChapterCount()
+  if (existCount >= rows.value.length) {
+    return ElMessage.info(
+      `本篇计划共 ${rows.value.length} 行，篇内已有 ${existCount} 章 —— 已全部覆盖，无续跑空间`
+    )
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将按已拍板计划逐章生成第 ${existCount + 1}~${rows.value.length} 行（共 ${rows.value.length - existCount} 章，每章约 3~5 分钟）。` +
+      `生成期间请勿关闭页面或切换篇；已生成的章都保住了，随时可暂停。每章完成后会在该章对话线程留痕。`,
+      '一键生成本篇',
+      { type: 'info', confirmButtonText: '开始生成', cancelButtonText: '先不跑' }
+    )
+  } catch {
+    return
+  }
+  batch.results = rows.value.map((_, i) =>
+    i < existCount ? { _st: 'preset', _note: `篇内已有第 ${i + 1} 章` } : null
+  )
+  batch.paused = false
+  batch.active = true
+  for (let i = existCount; i < rows.value.length; i++) {
+    if (batch.paused) break
+    await generateOne(i)
+  }
+  batch.active = false
+  batch.currentIndex = -1
+  if (batch.paused) {
+    ElMessage.info(`已停止：本次完成 ${batchDoneCount.value} 章。点「续跑本篇」从断点接着跑`)
+  } else if (batchFailedCount.value) {
+    ElMessage.warning(
+      `批量结束：成功 ${batchDoneCount.value} 章，失败 ${batchFailedCount.value} 行（可在面板里单行重试）`
+    )
+  } else {
+    ElMessage.success(`本篇批量生成完成：共 ${batchDoneCount.value} 章，每章对话线程已留痕`)
+  }
+}
+
+async function generateOne(i) {
+  const row = rows.value[i]
+  batch.currentIndex = i
+  batch.streamText = ''
+  batch.results[i] = { _st: 'running' }
+  const controller = new AbortController()
+  batch.controller = controller
+  let chapterId = null
+  let words = 0
+  let errMsg = ''
+  let stopNote = ''
+  try {
+    await generateChapterStream(
+      novelId.value,
+      {
+        chapter_no: 1,   // 占位：article_id 模式下后端自动按「本篇最大序号+1」接续（chapter.py 章节序号逻辑）
+        article_id: articleId.value,
+        title: row.beat || null,
+        prompt_hint: batchPrompt(row),
+        from_discussion: true,
+        trigger_foreshadow_ids: [],
+        word_range: {
+          min: Math.max(800, (row.target_words || 2000) - 500),
+          max: row.target_words || 3000,
+        },
+        temperature: 0.75,      // 与 GenerateChapterDialog 同源：低温+无惩罚是长文复读主因
+        enable_thinking: true,  // 长文必须开思考防复读（chapter.py 定论）
+      },
+      (event, data) => {
+        if (event === 'chunk') {
+          batch.streamText += data.text || ''
+          nextTick(() => {
+            if (streamBox.value) streamBox.value.scrollTop = streamBox.value.scrollHeight
+          })
+        } else if (event === 'saved') {
+          chapterId = data?.chapter_id || null
+          words = data.word_count || 0
+        } else if (event === 'stopped') {
+          stopNote = data?.reason === 'detected_repetition'
+            ? '检测到重复循环，正文已截断落库'
+            : (data?.reason || '')
+        } else if (event === 'error') {
+          errMsg = data?.message || '生成失败'
+        }
+      },
+      { signal: controller.signal, modelId: store.currentModelId }
+    )
+    if (chapterId) {
+      batch.results[i] = { _st: 'done', _words: words, _chapterId: chapterId, _note: stopNote }
+      await traceToThread(row, chapterId, words)
+      store.loadStructure(novelId.value).catch(() => {})  // 侧栏树刷新出新章
+    } else {
+      batch.results[i] = { _st: 'failed', _error: errMsg || '未产出正文（未落库）' }
+    }
+  } catch (e) {
+    batch.results[i] = e?.name === 'GenerationStopped'
+      ? { _st: 'failed', _error: '手动停止（未落库）' }
+      : { _st: 'failed', _error: e?.message || String(e) }
+  } finally {
+    batch.controller = null
+  }
+}
+
+// 每章完成 → 该章对话线程留两条消息（用户拍板的留痕形式）：
+// user = 生成指令（之后在该章对话里接着说「把开头改悬念点」，上下文自然衔接）；
+// ai = 完成回执。失败只影响留痕，不影响已落库的正文。
+async function traceToThread(row, chapterId, words) {
+  try {
+    const title = row.beat || `第 ${row.no} 行`
+    await discussionAppend(
+      novelId.value,
+      {
+        role: 'user',
+        content: `按已确认的篇规划生成《${title}》——本篇第 ${row.no}/${rows.value.length} 章。要点：${row.summary || '按计划推进'}`,
+      },
+      chapterId
+    )
+    await discussionAppend(
+      novelId.value,
+      {
+        role: 'assistant',
+        content: `✅ 已完成《${title}》（约 ${words} 字），正文已存入本篇。直接在这里继续对话即可修改这一章。`,
+        meta: { type: 'chapter_done', chapter_id: chapterId },
+      },
+      chapterId
+    )
+  } catch { /* 留痕失败不影响正章 */ }
+}
+
+function pauseBatch() {
+  batch.paused = true
+  ElMessage.info('将在当前章生成完毕后暂停（已生成的章都保住了）')
+}
+
+function stopBatch() {
+  batch.paused = true
+  batch.controller?.abort()   // 立即中断当前章（中断的这章不落库）
+  ElMessage.info('已终止')
+}
+
+async function retryOne(i) {
+  if (batch.active) return
+  batch.active = true
+  batch.paused = false
+  try {
+    await generateOne(i)
+  } finally {
+    batch.active = false
+    batch.currentIndex = -1
+  }
+}
+
+async function retryFailed() {
+  if (batch.active) return
+  const idx = batch.results
+    .map((r, i) => (r?._st === 'failed' ? i : -1))
+    .filter((i) => i >= 0)
+  if (!idx.length) return
+  batch.active = true
+  batch.paused = false
+  try {
+    for (const i of idx) {
+      if (batch.paused) break
+      await generateOne(i)
+    }
+  } finally {
+    batch.active = false
+    batch.currentIndex = -1
   }
 }
 
@@ -806,4 +1142,27 @@ const pcStatusType = (s) => ({ pending: 'warning', confirmed: 'success', dismiss
 /* 生成 / 确认弹窗 */
 .pv-gen-tip { margin-left: 10px; color: #c0c4cc; font-size: 12px; }
 .pv-confirm-name { margin-bottom: 12px; color: #606266; }
+
+/* 批量生成面板 */
+.pv-batch-idle { color: #c0c4cc; font-size: 12px; }
+.pv-batch-note { color: #909399; font-size: 12px; }
+.pv-batch-stream { margin-top: 12px; }
+.pv-batch-stream-title {
+  font-size: 13px; color: #606266; margin-bottom: 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.pv-batch-stream-text {
+  margin: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  color: var(--el-text-color-primary);
+}
 </style>

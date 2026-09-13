@@ -214,6 +214,8 @@ const globalEntries = [
   { label: '观测', icon: TrendCharts, name: 'observability' },
   // Phase 7.5：篇规划（计划表格 / 选角 / 引入单 / 交接警告）—— 同上，必须有可达入口
   { label: '篇规划', icon: Memo, name: 'plan' },
+  // 章节列表（全篇章节总览 / 手动编辑）—— 路由早已存在但一直零入口（零入口病第三例）
+  { label: '章节列表', icon: Files, name: 'chapters' },
 ]
 function goEntry(entry) {
   router.push({ name: entry.name })
