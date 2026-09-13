@@ -610,7 +610,10 @@ def refine_line(db: Session, project_id: str, article_id: str, *,
     # ⚠️ 深拷贝：lines 与 plan.plan["lines"] 是**同一个列表对象**，SQLAlchemy 对 JSON 列
     # 用值比较判断是否 dirty —— 不拷贝的话新值==旧值（共享列表已同步变化），UPDATE 会被跳过
     # （2026-09-11 实测踩坑：refine 返回正确但库纹丝不动）。
-    plan.plan = copy.deepcopy({"lines": lines, "notes": (plan.plan or {}).get("notes") or ""})
+    # 保留 carryover/reentry_materials（7.3.5 连续性数据，同 save_lines）。
+    old = plan.plan or {}
+    kept = {k: old[k] for k in ("carryover", "reentry_materials") if old.get(k)}
+    plan.plan = copy.deepcopy({"lines": lines, "notes": old.get("notes") or "", **kept})
     plan.updated_at = datetime.utcnow()
     db.commit()
     # 7.3.5：行变了，pending 引入单同步重落（confirmed/dismissed 不动）
@@ -633,13 +636,18 @@ def confirm_plan(db: Session, project_id: str, article_id: str) -> dict:
 
 
 def get_plan(db: Session, project_id: str, article_id: str) -> dict | None:
-    """取当前计划（含行列表）。"""
+    """取当前计划（含行列表 + 连续性数据）。
+
+    `carryover` / `reentry_materials` 是 7.3.5 `_finalize_plan` 存进 plan JSON 的
+    连续性数据，前端篇规划页（7.5）直接展示 —— 行级编辑保存时会原样保留（见 save_lines）。
+    """
     plan = (db.query(ArticlePlanORM)
             .filter_by(project_id=project_id, article_id=article_id)
             .order_by(ArticlePlanORM.updated_at.desc()).first())
     if plan is None:
         return None
-    lines = (plan.plan or {}).get("lines") or []
+    data = plan.plan or {}
+    lines = data.get("lines") or []
     return {
         "id": plan.id,
         "project_id": plan.project_id,
@@ -648,8 +656,10 @@ def get_plan(db: Session, project_id: str, article_id: str) -> dict | None:
         "template_names": plan.template_names or [],
         "origin": plan.origin,
         "status": plan.status,
-        "notes": (plan.plan or {}).get("notes") or "",
+        "notes": data.get("notes") or "",
         "lines": lines,
+        "carryover": data.get("carryover") or {},
+        "reentry_materials": data.get("reentry_materials") or [],
     }
 
 
@@ -662,9 +672,15 @@ def save_lines(db: Session, project_id: str, article_id: str, *,
     if plan is None:
         raise RuntimeError("该篇还没有计划")
     fixed = _valid_lines(lines)
-    # 同 refine_line：深拷贝断开与旧 JSON 值的共享引用（否则 UPDATE 被跳过）
+    # ⚠️ 深拷贝 + 保留 7.3.5 的连续性数据（carryover/reentry_materials）——
+    # 直接重写 {"lines","notes"} 会把它们从 plan JSON 里洗掉（7.5 修，2026-09-13）
+    old = plan.plan or {}
+    kept = {}
+    for key in ("carryover", "reentry_materials"):
+        if old.get(key):
+            kept[key] = old[key]
     plan.plan = copy.deepcopy(
-        {"lines": fixed, "notes": notes if notes is not None else (plan.plan or {}).get("notes") or ""})
+        {"lines": fixed, "notes": notes if notes is not None else old.get("notes") or "", **kept})
     plan.updated_at = datetime.utcnow()
     db.commit()
     # 7.3.5：行变了，pending 引入单同步重落（confirmed/dismissed 不动）

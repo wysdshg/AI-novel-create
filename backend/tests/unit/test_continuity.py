@@ -10,6 +10,7 @@
    缺席期世界线事件（实体命中）→ fallback 如实标注；resolved 伏笔不算；
 4. **级联删除**：删篇/卷/作品必须清掉 plan_chars。
 """
+import json
 import uuid
 
 import pytest
@@ -248,6 +249,36 @@ class TestCarryover:
         db, pid = proj
         r = pc.carryover_check(db, pid, "a1", _lines([]), [])
         assert r == {"carryover_names": [], "last_chapters": [], "from_article_id": None}
+
+    def test_save_lines_keeps_carryover_and_get_plan_exposes_it(self, proj, monkeypatch):
+        """7.5 修（2026-09-13）：save_lines/refine_line 重写 plan JSON 时不得洗掉
+        carryover/reentry；get_plan 要把它们吐给前端。"""
+        db, pid = proj
+        plan = _mk_plan(db, pid)
+        carry = {"carryover_names": ["王大锤"], "last_chapters": [{"name": "王大锤", "chapter_no": 10}],
+                 "from_article_id": "a2"}
+        reentry = [{"character_id": "c1", "name": "药老", "priority": "foreshadow",
+                    "foreshadows": [], "world_events": [], "arc_digest": []}]
+        plan.plan = {"lines": _lines([]), "notes": "", "carryover": carry, "reentry_materials": reentry}
+        db.commit()
+
+        pc.save_lines(db, pid, "a1", lines=_lines(["林小满"]), notes="改过")
+        got = pc.get_plan(db, pid, "a1")
+        assert got["carryover"] == carry, "行级保存不得洗掉交接差集"
+        assert got["reentry_materials"] == reentry, "行级保存不得洗掉回归材料"
+        assert got["notes"] == "改过"
+        assert [l["new_chars"] for l in got["lines"]] == [["林小满"]]
+
+        # refine_line 同样保留（mock 掉 LLM 调用）
+        monkeypatch.setattr(pc, "ds_key", lambda db: "fake-key")
+        monkeypatch.setattr(pc, "_ds_post", lambda key, prompt, **kw: json.dumps(
+            {"no": 1, "beat": "b", "summary": "冲突加大后", "new_chars": ["林小满"],
+             "recall_chars": [], "target_words": 100, "hook": "h", "template_ref": ""},
+            ensure_ascii=False))
+        pc.refine_line(db, pid, "a1", line_no=1, instruction="把冲突加大")
+        got2 = pc.get_plan(db, pid, "a1")
+        assert got2["carryover"] == carry
+        assert got2["reentry_materials"] == reentry
 
 
 # ---------------------------------------------------------------------------

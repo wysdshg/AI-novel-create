@@ -184,7 +184,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Files, Delete, Setting, Document, Notebook, Collection,
-  ChatLineRound, DataAnalysis, TrendCharts,
+  ChatLineRound, DataAnalysis, TrendCharts, Memo,
 } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { volumeApi } from '@/api/volume'
@@ -212,6 +212,8 @@ const globalEntries = [
   { label: '生成评估', icon: DataAnalysis, name: 'eval' },
   // Phase 4.2/4.3：观测（用量计量 + 反馈回流）
   { label: '观测', icon: TrendCharts, name: 'observability' },
+  // Phase 7.5：篇规划（计划表格 / 选角 / 引入单 / 交接警告）—— 同上，必须有可达入口
+  { label: '篇规划', icon: Memo, name: 'plan' },
 ]
 function goEntry(entry) {
   router.push({ name: entry.name })

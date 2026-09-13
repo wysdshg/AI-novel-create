@@ -6,6 +6,23 @@
 ---
 
 ## 2026-09-13
+- **★ 7.5 篇规划前端页 v1（步骤 1~5 一次到位，vite build 通过 + 后端 346 单测全绿）**：
+  - **新页面 `views/PlanView.vue`**（~700 行）+ `api/plan.js` + `api/casting.js`；
+    路由 `/workspace/plan` + 侧栏「篇规划」入口（零入口病防线：路由必有可达入口）。
+  - **计划视图**：小说/篇双选择器（带出侧栏已选）+ 生成弹窗（口述 hint/章数/跳过模板，LLM 约 1~2 分钟）；
+    表格行内编辑（beat/summary/钩子/召回/新角色/字数）；行级「AI 改这行」（refine-line）；拍板确认（锁定）；
+    超每篇 3 新角色的剔除以 UI 提示（不静默）。
+  - **连续性区（7.3.5）**：carryover 交接警告横幅（名单 + 最后出场章 + 三选一提示）；
+    回归理由材料包折叠面板（foreshadow/world_events/fallback 三级 priority 标注）。
+  - **选角面板（7.3）**：槽位卡片 grid——分数进度条 + **0.58 阈值红线** + source（auto/manual）标签 +
+    needs_reentry_note 标记 + unmatched 槽位高亮 + 重算（manual 不覆盖）+ 手改/清空（选本书角色）。
+  - **引入单面板（7.3.5）**：按状态过滤（全部/待确认/已建卡/已忽略）；绑定功能位（select 接 casting 槽位）；
+    确认建卡弹窗（role_type/personality/background/brief 可选）；忽略/恢复；`first_appearance`
+    展示**标注"篇内行号"语义**（tooltip 说明两套编号）。
+  - **配套后端修复（7.3.5 遗留 bug）**：`save_lines`/`refine_line` 重写 plan JSON 会把
+    `carryover`/`reentry_materials` **洗掉**（作者一改行连续性数据就蒸发）→ 重写时原样保留；
+    `get_plan` 此前不吐这两个字段 → 补齐给前端。新增 1 单测（mock LLM），全量 **346 全绿**。
+  - **需重启后端**（plan_crud 三处改动）+ 前端 `npm run dev` 后真机验证交互流程。
 - **7.3.5 重启后真机验证全绿 + 清理 `__t` 残留项目 + 下一阶段规划拍板**：
   - 重启验证：OpenAPI **103 路径**（99+4），`planned-chars` 三端点 + `reentry-material` 全在册；
     DB `plan_chars` 表已建（12 列全对，`UNIQUE(plan_id,name)` 在册——`PRAGMA index_list` 的
