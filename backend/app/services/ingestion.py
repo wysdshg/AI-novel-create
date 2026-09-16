@@ -13,6 +13,7 @@
 import logging
 import json
 import re
+import time
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -22,7 +23,7 @@ from app.core.gateway.registry import get_adapter
 from app.models.orm import ChapterORM, ArticleORM, VolumeORM, ProjectORM
 from app.services import (
     app_config, discussion_crud, memory_crud, model_crud,
-    reference_crud, skill_dispatch,
+    reference_crud, skill_dispatch, usage_crud,
 )
 
 # 摄取用的抽取指令。刻意用「填空题」形式而不是开放描述——
@@ -40,17 +41,20 @@ EXTRACT_SYSTEM = (
     '  "foreshadow_actions": [{"action": "bury/hint/resolve", "desc": "涉及的伏笔"}],\n'
     '  "new_entities": [{"kind": "character/faction/location", "name": "名称", '
     '"brief": "一句话说明"}],\n'
+    '  "relations": [{"subject": "角色A", "object": "角色B", "type": "A对B的称呼或关系词"}],\n'
     '  "next_directions": [{"title": "走向标题", "detail": "具体怎么写，两三句", '
     '"tension": "高/中/低"}]\n'
     '}\n'
     "next_directions 给 3 条，要求方向彼此不同（不要三条都是打一架），"
     "并且必须能从本章结尾自然接上。\n"
-    "new_entities 只填本章新出现、且资料里没有的；没有就给空数组。"
+    "new_entities 只填本章新出现、且资料里没有的；没有就给空数组。\n"
+    "relations 只写本章有互动的两人，subject 和 object 必须出自 characters 数组，"
+    "type 用其中一人对另一人的称呼或关系词（如师父/结拜/宿敌），每个字都简短。"
 )
 
 _JSON_KEYS = (
     "summary", "ending_hook", "characters", "locations",
-    "plot_points", "foreshadow_actions", "new_entities", "next_directions",
+    "plot_points", "foreshadow_actions", "new_entities", "relations", "next_directions",
 )
 
 
@@ -140,6 +144,18 @@ def normalize_extract(data: dict) -> dict:
                 })
     out["new_entities"] = ne[:10]
 
+    rel = []
+    for item in _as_list(data.get("relations")):
+        # 只认结构化条目：字符串形态（"A对B：师父"）缺字段结构，丢弃不猜
+        if isinstance(item, dict):
+            subj = str(item.get("subject") or "").strip()
+            obj = str(item.get("object") or "").strip()
+            rtype = str(item.get("type") or item.get("relation_type") or "").strip()
+            if subj and obj and rtype:
+                # relation_type 列宽 String(20)，超长直接截断（防 DB 报错）
+                rel.append({"subject": subj, "object": obj, "type": rtype[:20]})
+    out["relations"] = rel[:12]
+
     nd = []
     for item in _as_list(data.get("next_directions")):
         if isinstance(item, dict):
@@ -178,6 +194,7 @@ def fallback_extract(db: Session, project_id: str, content: str) -> dict:
         "plot_points": [],
         "foreshadow_actions": [],
         "new_entities": [],
+        "relations": [],
         "next_directions": [],
         "_fallback": True,
     }
@@ -216,9 +233,38 @@ def _model_config(m) -> dict:
         "model_name": m.model_name,
         "temperature": 0.2,          # 抽取是信息任务，温度必须压低
         "top_p": m.top_p,
-        "max_tokens": min(m.max_tokens or 2000, 2000),
+        # max_tokens 下限 2600：抽取 schema 加 relations 后满字段输出约 2100+ token，
+        # 预算不足会被硬截断 → JSON 解析失败 → 整章白抽走规则兜底（得不偿失）。
+        # 上限 4096：防用户配置过大时抽取这种短任务白占预算（正文生成有独立覆盖，见 docs/04 B8）。
+        "max_tokens": min(max(m.max_tokens or 2000, 2600), 4096),
         "enable_thinking": False,    # 思考过程会污染 JSON 输出
     }
+
+
+def _meter(db: Session, *, scene: str, project_id: str | None, model, adapter,
+           t0: float, ok: bool, messages: list | None, out_text: str | None) -> None:
+    """记录一次模型调用用量（08-B5：摄取链路此前不记账 → 观测页统计偏低）。
+
+    `record_usage` 自身失败静默（计量是旁路，见 usage_crud 模块注释），这里不再包 try。
+    语义：只记「模型调用」本身 —— 解析失败不算调用失败（走规则兜底），调用失败（ok=False）也记
+    （prompt 已发出同样烧 token）。
+    """
+    try:
+        usage_crud.record_usage(
+            db,
+            scene=scene,
+            vendor=getattr(model, "vendor", None),
+            model_name=getattr(model, "model_name", None),
+            usage=getattr(adapter, "last_usage", None) if adapter is not None else None,
+            project_id=project_id,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=ok,
+            prompt_text="".join(str(m.get("content") or "") for m in (messages or [])),
+            completion_text=out_text,
+        )
+    except Exception as e:  # noqa: BLE001
+        # 纵深防御：record_usage 自身已全量 try，这里再兜一层 —— 计量绝不影响摄取主链路
+        logger.warning(f"[ingestion] 用量记录失败 scene={scene}: {type(e).__name__}: {e}")
 
 
 # ===========================================================================
@@ -278,16 +324,26 @@ def ingest_chapter(
             {"role": "system", "content": "\n\n".join(sys_parts)},
             {"role": "user", "content": f"第{chapter.chapter_no}章 {chapter.title or ''}\n\n{clip}"},
         ]
+        _t0 = time.monotonic()
+        adapter = None
+        raw_out = None
         try:
             adapter = get_adapter(m.vendor, _model_config(m))
             raw_out = adapter.chat(messages)
+            _meter(db, scene="ingest_extract", project_id=project_id, model=m,
+                   adapter=adapter, t0=_t0, ok=True, messages=messages,
+                   out_text=raw_out or "")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ingestion] 记忆抽取调用失败: {type(e).__name__}: {str(e)[:150]}")
+            _meter(db, scene="ingest_extract", project_id=project_id, model=m,
+                   adapter=adapter, t0=_t0, ok=False, messages=messages, out_text=None)
+        else:
+            # 解析不在计量语义内：解析失败 ≠ 调用失败（走规则兜底，调用本身已计 ok=True）
             parsed = parse_json_loose(raw_out or "")
             if parsed:
                 extracted = normalize_extract(parsed)
                 if not extracted.get("summary"):
                     extracted = None  # 摘要都空，等于没抽出来
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[ingestion] 记忆抽取调用失败: {type(e).__name__}: {str(e)[:150]}")
 
     used_fallback = extracted is None
     if used_fallback:
@@ -334,6 +390,26 @@ def ingest_chapter(
         result["foreshadow_sync"] = fs_stats
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[ingestion] 伏笔回注失败: {type(e).__name__}: {e}")
+
+    # ---------- 2.7 关系/势力回注（任务③批次2）----------
+    # 补齐另一条「最后一米」：relations/new_entities 此前只存进章级记忆 JSON、
+    # 从不写实体表。这里把本章抽到的关系自动落 relations 表（subject/object 必须
+    # 同时满足「在本章 characters 里」+「能解析到库内角色」双条件，防幻觉防脏边）；
+    # new_entities 里的 faction 自动落 factions 表（character/location 仍走人工确认）。
+    # 幂等（重跑同一章不重复建），失败静默不阻断后续步骤。
+    try:
+        from app.services import faction_crud, relation_crud
+        result["entity_sync"] = {
+            "relations": relation_crud.sync_from_extract(
+                db, project_id, extracted.get("relations"),
+                chapter_characters=extracted.get("characters"),
+                chapter_no=chapter.chapter_no,
+            ),
+            "factions": faction_crud.sync_from_extract(
+                db, project_id, extracted.get("new_entities")),
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ingestion] 关系/势力回注失败: {type(e).__name__}: {e}")
 
     # ---------- 3. 篇章摘要写进参考文档（追加，不覆盖） ----------
     if chapter.article_id:
@@ -445,9 +521,14 @@ def _resolve_agg_model(db: Session, model_id: str | None = None):
     return _pick_model(db)
 
 
-def _llm_compress_summary(heading: str, child_summaries: list[str], target_words: int,
-                          model) -> str | None:
-    """用模型把若干子级摘要压成一段约 target_words 字的连贯概览。失败返回 None。"""
+def _llm_compress_summary(db: Session, heading: str, child_summaries: list[str],
+                          target_words: int, model,
+                          project_id: str | None = None) -> str | None:
+    """用模型把若干子级摘要压成一段约 target_words 字的连贯概览。失败返回 None。
+
+    `db` 仅用于用量记账（08-B5）；调用方（aggregate_overview）均在非流式上下文，
+    不触犯「流式生成器内禁用请求级 session」铁律（04-C1）。
+    """
     bullet = "\n".join(f"- {s}" for s in child_summaries if s and str(s).strip())
     if not bullet:
         return None
@@ -456,14 +537,21 @@ def _llm_compress_summary(heading: str, child_summaries: list[str], target_words
         f"约 {target_words} 字。要求：只写主线进展与关键变化，不要评价、不要分点、"
         f"不要标题、不要以「好的 / 以下是」开头。\n{bullet}"
     )
+    messages = [{"role": "user", "content": prompt}]
+    _t0 = time.monotonic()
+    adapter = None
     try:
         cfg = dict(_model_config(model))
         cfg["max_tokens"] = 600
         adapter = get_adapter(model.vendor, cfg)
-        text = adapter.chat([{"role": "user", "content": prompt}])
+        text = adapter.chat(messages)
+        _meter(db, scene="ingest_aggregate", project_id=project_id, model=model,
+               adapter=adapter, t0=_t0, ok=True, messages=messages, out_text=text or "")
         return _strip_text(text) or None
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[aggregation] LLM 压缩失败({heading}): {type(e).__name__}: {str(e)[:150]}")
+        _meter(db, scene="ingest_aggregate", project_id=project_id, model=model,
+               adapter=adapter, t0=_t0, ok=False, messages=messages, out_text=None)
         return None
 
 
@@ -495,7 +583,8 @@ def aggregate_overview(db: Session, project_id: str, article_id: str | None = No
         if not child:
             continue
         if model is not None:
-            s = _llm_compress_summary(f"篇《{art.name}》", child, 200, model)
+            s = _llm_compress_summary(db, f"篇《{art.name}》", child, 200, model,
+                                      project_id=project_id)
         else:
             s = None
         if not s:
@@ -516,7 +605,8 @@ def aggregate_overview(db: Session, project_id: str, article_id: str | None = No
         if not child:
             continue
         if (not auto) and model is not None:
-            s = _llm_compress_summary(f"卷《{vol.name}》", child, 250, model) or _concat_summary(child, cap=600)
+            s = _llm_compress_summary(db, f"卷《{vol.name}》", child, 250, model,
+                                      project_id=project_id) or _concat_summary(child, cap=600)
         else:
             s = _concat_summary(child, cap=600)
         if s and s != (vol.summary or ""):
@@ -528,7 +618,8 @@ def aggregate_overview(db: Session, project_id: str, article_id: str | None = No
     child = [v.summary for v in all_vols if (v.summary or "").strip()]
     if child:
         if (not auto) and model is not None:
-            s = _llm_compress_summary("小说总览", child, 300, model) or _concat_summary(child, cap=800)
+            s = _llm_compress_summary(db, "小说总览", child, 300, model,
+                                      project_id=project_id) or _concat_summary(child, cap=800)
         else:
             s = _concat_summary(child, cap=800)
         proj = db.query(ProjectORM).filter_by(id=project_id).first()
@@ -588,15 +679,23 @@ def compress_stage(db: Session, project_id: str, from_no: int, to_no: int) -> di
     data = None
     m = _pick_model(db)
     if m is not None:
+        _t0 = time.monotonic()
+        stage_messages = [
+            {"role": "system", "content": STAGE_SYSTEM},
+            {"role": "user", "content": material[:12000]},
+        ]
+        adapter = None
         try:
             adapter = get_adapter(m.vendor, _model_config(m))
-            out = adapter.chat([
-                {"role": "system", "content": STAGE_SYSTEM},
-                {"role": "user", "content": material[:12000]},
-            ])
+            out = adapter.chat(stage_messages)
+            _meter(db, scene="ingest_stage", project_id=project_id, model=m,
+                   adapter=adapter, t0=_t0, ok=True, messages=stage_messages,
+                   out_text=out or "")
             data = parse_json_loose(out or "")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ingestion.compress_stage] 模型调用失败: {str(e)[:150]}")
+            _meter(db, scene="ingest_stage", project_id=project_id, model=m,
+                   adapter=adapter, t0=_t0, ok=False, messages=stage_messages, out_text=None)
 
     if not data or not str(data.get("summary") or "").strip():
         # 兜底：直接把各章摘要串起来截断，信息密度低但不丢链

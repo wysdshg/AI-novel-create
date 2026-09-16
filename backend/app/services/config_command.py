@@ -13,6 +13,7 @@ import logging
 import json
 import math
 import re
+import time
 
 from sqlalchemy.orm import Session
 
@@ -23,7 +24,9 @@ from app.schemas.database import (
     LocationCreate, LocationUpdate,
     RelationCreate,
 )
-from app.services import character_crud, faction_crud, location_crud, relation_crud, model_crud
+from app.services import (
+    character_crud, faction_crud, location_crud, relation_crud, model_crud, usage_crud,
+)
 from app.core.gateway.registry import get_adapter
 from app.core.response import ok
 
@@ -164,12 +167,38 @@ def run(db: Session, project_id: str, text: str, dry_run: bool = False,
         "max_tokens": 4000,
         "enable_thinking": default.enable_thinking,
     }
+    _t0 = time.monotonic()
+    adapter = None
     try:
         adapter = get_adapter(default.vendor, config)
         raw = adapter.chat(messages, temperature=0.3)
+        # ── 用量计量（08-B5）：指令解析此前不记账 → 观测页统计偏低 ──
+        usage_crud.record_usage(
+            db,
+            scene="command",
+            vendor=getattr(default, "vendor", None),
+            model_name=getattr(default, "model_name", None),
+            usage=getattr(adapter, "last_usage", None),
+            project_id=project_id,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            ok=True,
+            prompt_text=text,
+            completion_text=raw or "",
+        )
     except Exception as e:  # noqa: BLE001
         # 结果里 model_ok=False 会告诉前端"模型没跑通"，服务端补堆栈（Phase 3.5）
         logger.exception(f"[config_command] 模型调用失败 vendor={default.vendor!r}")
+        # 失败也记（prompt 已发出同样烧 token，08-B5）
+        usage_crud.record_usage(
+            db,
+            scene="command",
+            vendor=getattr(default, "vendor", None),
+            model_name=getattr(default, "model_name", None),
+            project_id=project_id,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            ok=False,
+            prompt_text=text,
+        )
         return ok({
             "reply": f"模型调用失败：{str(e)[:200]}",
             "changes": _empty_changes(),

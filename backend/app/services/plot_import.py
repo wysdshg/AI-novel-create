@@ -45,6 +45,18 @@ DS_BASE = "https://api.deepseek.com"
 DS_MODEL = "deepseek-flash"
 DS_KEY_CONFIG = "llm.deepseek_key"
 
+# 弧归并的可选 provider（2026-09-15 加）：魔搭 Qwen3.8-Flash-Next。
+# 为什么只在弧归并用：arc 每本仅 1~5 批（全库 7 本 = 21 次调用），而魔搭免费额度 200 次/天
+# → 用免费额度干最贵的活（distill 1 组 1 次，131 组会吃掉 65% 日额度，故不接）。
+# vendor 必须给 "qwen"：openai_compat 的思考字段白名单按 vendor 分派；
+# 但管线不走 gateway，这里直接自己拼 chat_template_kwargs（见 _ms_post）。
+MS_BASE = "https://api-inference.modelscope.cn/v1"
+MS_MODEL = "Qwen/Qwen3.8-Flash-Next"
+MS_KEY_CONFIG = "llm.modelscope_key"
+
+# 可用 provider 名（CLI --arc-provider 的取值）
+ARC_PROVIDERS = ("deepseek", "modelscope")
+
 MIN_INTERVAL_S = 2.0     # 请求最小间隔（防限流）
 MAX_RETRY = 5            # 429/5xx 重试次数
 MAX_CHAPTER_CHARS = 6000 # 送入 LLM 的单章正文上限（一章 3~4k 字足够）
@@ -106,6 +118,11 @@ def _chat_post(url: str, key: str, body: dict, *, timeout: int,
     持 Session 会破坏"Session 非线程安全"的既有约定；且记账失败绝不冒泡（回调内部自吞）。
     """
     rate = rate or RateLimiter()
+    # 绕过系统代理（2026-09-15 加）：本机设了 HTTPS_PROXY（Clash 一类），urllib 会**继承**
+    # 环境变量并把请求发给本地代理 → 实测 `Tunnel connection failed: 502 Bad Gateway`
+    # （魔搭请求 2/2 批次全被打回，靠重试才侥幸成功，且留下 leftover）。
+    # 离线管线是直连厂商的批处理子系统，语义上就该直连，与 curl --noproxy '*' 同理。
+    _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     last_err: Exception | None = None
     for attempt in range(MAX_RETRY):
         rate.wait()
@@ -117,7 +134,7 @@ def _chat_post(url: str, key: str, body: dict, *, timeout: int,
         )
         _t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _opener.open(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             if on_usage:
                 _safe_usage_cb(on_usage, data.get("usage"), int((time.time() - _t0) * 1000), True)
@@ -172,8 +189,18 @@ def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
 
 def ds_key(db: Session) -> str | None:
     """取 DeepSeek Key（app_configs.llm.deepseek_key）。"""
+    return _read_key(db, DS_KEY_CONFIG)
+
+
+def ms_key(db: Session) -> str | None:
+    """取魔搭 ModelScope Key（app_configs.llm.modelscope_key）。"""
+    return _read_key(db, MS_KEY_CONFIG)
+
+
+def _read_key(db: Session, config_key: str) -> str | None:
+    """从 app_configs 读一个 key 配置，兼容「裸串」与「JSON 字符串」两种存法。"""
     from app.services import app_config
-    v = app_config.get(db, DS_KEY_CONFIG, None)
+    v = app_config.get(db, config_key, None)
     if isinstance(v, str):
         v = v.strip()
         if v.startswith('"'):
@@ -206,6 +233,33 @@ def _ds_post(key: str, user_content: str, *, max_tokens: int = 3000,
                       timeout=timeout, rate=rate, label="DeepSeek", on_usage=on_usage)
 
 
+def _ms_post(key: str, user_content: str, *, max_tokens: int = 3000,
+             temperature: float = 0.2, timeout: int = 300,
+             rate: RateLimiter | None = None, on_usage=None) -> str:
+    """魔搭 ModelScope Qwen3.8-Flash-Next（**必须显式关闭思考**，2026-09-15 加）。
+
+    为什么必须关：ModelScope 上的 Qwen3.x **默认思考开**（docs/04 §B2/B13）——
+    实测无标点长段 1870 字、首字延迟 407s；而 arc 归并要的是干净 JSON，
+    reasoning 会吃光 max_tokens 预算并污染 content。
+
+    字段名坑：魔搭认的是**非标准扩展** `chat_template_kwargs.enable_thinking`
+    （见 docs/04 §B2 的厂商白名单：qwen 走 chat_template_kwargs；deepseek/zhipu/nvidia
+    才走顶层 thinking.type）。管线不走 gateway，所以这里手工拼这个字段，
+    与 `openai_compat.py` 的 `_broken_ms_qwen35` 分支保持同一语义。
+
+    另注：arc 归并的 prompt **不含对话历史**（单条 user 消息）→ 无 prefix cache 顾虑。
+    """
+    body = {
+        "model": MS_MODEL,
+        "messages": [{"role": "user", "content": user_content}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    return _chat_post(MS_BASE + "/chat/completions", key, body,
+                      timeout=timeout, rate=rate, label="魔搭", on_usage=on_usage)
+
+
 def make_usage_cb(scene: str, *, project_id: str | None = None):
     """构造一个**自带独立 Session** 的记账回调（离线管线专用，2026-09-13）。
 
@@ -215,24 +269,51 @@ def make_usage_cb(scene: str, *, project_id: str | None = None):
 
     失败一律静默：记账是旁路，永远不许影响模型调用。
     """
+    # scene 前缀 → (vendor, model_name)：**必须显式映射，不能用 startswith("ds_") 二分**
+    # （2026-09-15 修：新增 ms_arc 后，二分写法会把魔搭调用误记成 siliconflow/Qwen3-8B，
+    #   成本分析会看错账）。
+    _VENDOR_OF = {
+        "ds_": ("deepseek", DS_MODEL),
+        "ms_": ("modelscope", MS_MODEL),
+        "sf_": ("siliconflow", SF_MODEL),
+    }
+    _vendor, _model = "siliconflow", SF_MODEL        # 兜底
+    for _prefix, (_v, _m) in _VENDOR_OF.items():
+        if scene.startswith(_prefix):
+            _vendor, _model = _v, _m
+            break
+
     def _cb(usage, duration_ms: int, ok: bool) -> None:
-        try:
-            from app.core import database
-            from app.services import usage_crud
-            database.get_engine()          # 确保 SessionLocal 已初始化（惰性全局）
-            db = database.SessionLocal()
+        from app.core import database
+        from app.services import usage_crud
+        # 写锁竞争重试（2026-09-14 加）：distill 是**串行单线程**——主线程在
+        # distill_template 里持写事务（模板+向量入库），回调的独立 Session 会撞
+        # SQLite 写锁（实测整轮 32 次记账全丢：database is locked）。主线程写完即释放，
+        # 退避重试即可拿到窗口；非锁类错误不重试（真错重试也没用）。
+        database.get_engine()          # 确保 SessionLocal 已初始化（惰性全局）
+        last_err: Exception | None = None
+        for attempt in range(4):
             try:
-                usage_crud.record_usage(
-                    db, scene=scene, vendor="deepseek" if scene.startswith("ds_") else "siliconflow",
-                    model_name=DS_MODEL if scene.startswith("ds_") else SF_MODEL,
-                    usage=usage, project_id=project_id,
-                    duration_ms=duration_ms, ok=ok,
-                )
-            finally:
-                db.close()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[plot_import] 用量记账失败（不影响调用）scene={scene}: "
-                           f"{type(e).__name__}: {e}")
+                db = database.SessionLocal()
+                try:
+                    usage_crud.record_usage(
+                        db, scene=scene,
+                        vendor=_vendor,
+                        model_name=_model,
+                        usage=usage, project_id=project_id,
+                        duration_ms=duration_ms, ok=ok,
+                    )
+                finally:
+                    db.close()
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if "locked" in str(e).lower() and attempt < 3:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                break
+        logger.warning(f"[plot_import] 用量记账失败（不影响调用）scene={scene}: "
+                       f"{type(last_err).__name__}: {last_err}")
     return _cb
 
 
@@ -572,6 +653,8 @@ def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
         for r in rows:
             r.segment_no = None
             r.segment_summary = None
+            # 同 merge_arcs：raw 必须一起清，否则后续 apply_replacement 会用旧 raw 覆盖新段文本
+            r.segment_summary_raw = None
         db.commit()
 
     bs = max(1, int(batch))
@@ -699,13 +782,27 @@ def export_report(db: Session, book_name: str, out_path: str | None = None) -> s
 
     n_segs = len({r.segment_no for r in rows})
     has_arc = any(k is not None for k in arcs)
+    # 弧归并用的哪家模型：从记账表回查（2026-09-15）——provider 现在是运行时可选，
+    # 不能写死 DS_MODEL，否则切魔搭后报告会撒谎。
+    arc_model: str | None = None
+    if has_arc:
+        try:
+            from app.models.orm import LlmUsageLogORM
+            row = (db.query(LlmUsageLogORM)
+                   .filter(LlmUsageLogORM.scene.in_(("ds_arc", "ms_arc")))
+                   .order_by(LlmUsageLogORM.created_at.desc()).first())
+            if row is not None:
+                arc_model = row.model_name
+        except Exception as e:  # noqa: BLE001 — 报告是旁路，回查失败不能拖垮导出
+            logger.warning(f"[plot_import] 回查弧归并模型失败（报告降级为不详）: "
+                           f"{type(e).__name__}: {e}")
     out: list[str] = [
         f"# 导入报告 · 《{book_name}》",
         "",
         f"- 章节：{len(rows)} 章 ｜ 情节段：{n_segs} 段"
         + (f" ｜ 故事弧：{len([k for k in arcs if k is not None])} 个" if has_arc else ""),
         f"- 模型：{SF_MODEL}（概括 / 段切分 / 分类）"
-        + (f" + {DS_MODEL}（弧归并）" if has_arc else ""),
+        + (f" + {arc_model or DS_MODEL}（弧归并）" if has_arc else ""),
         "",
         "---",
         "",
@@ -756,9 +853,26 @@ def export_report(db: Session, book_name: str, out_path: str | None = None) -> s
     return out_path
 
 
+# 段标签固定菜单（种子口径，08-B6）：覆盖网文常见情节类型；本书已用标签会动态并入
+SEGMENT_LABEL_MENU = [
+    "学院大比", "秘境寻宝", "势力冲突", "日常过渡", "升级突破",
+    "结盟交涉", "追逃猎杀", "夺宝争夺", "复仇清算", "探查解谜",
+    "危机救援", "身世揭秘", "拍卖交易", "阵地防守",
+]
+
+
 def label_segments(db: Session, book_name: str, *,
                    rate: RateLimiter | None = None) -> dict:
-    """给每个情节段打情节类型标签（4~8 字），写回该段全部章的 plot_label。"""
+    """给每个情节段打情节类型标签（4~8 字），写回该段全部章的 plot_label。
+
+    **标签口径治理（08-B6，2026-09-16）**：旧版让模型自由发挥 → 同一条故事线的连续段
+    被标成不同标签（试点实测：赫连烈冲突系列 6 段全标「追逃猎杀」，实为冲突对峙）。
+    现在三级复用抑制噪声：
+      1. 【固定示例菜单】原有示例保留作种子；
+      2. 【本书已用标签】DB 里该书出现过的标签全部进菜单（全书口径一致）；
+      3. 【上一段标签】显式传入，提示"同一条故事线通常延续同标签，情节确实转型才换"。
+    模型仍可自创新标签（菜单都不合适时），新标签即时进菜单 → 越跑越收敛。
+    """
     rate = rate or RateLimiter()
     rows = (
         db.query(ChapterSummaryORM)
@@ -770,15 +884,31 @@ def label_segments(db: Session, book_name: str, *,
     segs: dict[int, list[ChapterSummaryORM]] = {}
     for r in rows:
         segs.setdefault(r.segment_no, []).append(r)
+
+    # 固定示例菜单（种子）+ 本书已用标签词表（全书口径一致的锚）
+    used_set: set[str] = set(SEGMENT_LABEL_MENU) | {
+        r[0].strip() for r in db.query(ChapterSummaryORM.plot_label)
+        .filter_by(book_name=book_name)
+        .filter(ChapterSummaryORM.plot_label.isnot(None)).distinct()
+        if r[0] and r[0].strip()
+    }
+    used_sorted = sorted(used_set)
+    prev_label: str | None = None
+    reused = 0
     labeled = 0
     for seg_no, seg_rows in sorted(segs.items()):
         summary = seg_rows[0].segment_summary or "。".join(r.summary for r in seg_rows)[:200]
+        menu = "、".join(used_sorted) if used_sorted else "（本书还没有标签，可自创）"
+        prev = (f"\n上一段标签：{prev_label}（同一条故事线通常延续同标签，"
+                "仅当情节确实转型才换）。") if prev_label else ""
         try:
             label = sf_chat(
                 db,
-                "下面是小说的一个情节段概括。请给它一个「情节类型」标签（4~8 字，"
-                "如：学院大比/秘境寻宝/势力冲突/日常过渡/升级突破/结盟交涉/追逃猎杀）。"
-                "只输出标签本身，不要引号和句号。\n\n" + summary,
+                "下面是小说的一个情节段概括。请从【候选标签】里选一个最贴切的"
+                "（**优先复用已有标签**，保持全书口径一致；只有都不合适才自创新标签，4~8 字）。"
+                "只输出标签本身，不要引号和句号。\n"
+                f"【候选标签】{menu}{prev}\n"
+                "【情节段概括】\n" + summary,
                 max_tokens=32, temperature=0.2, rate=rate, scene="sf_label",
             )
             label = label.strip().strip("「」\"'。.")
@@ -787,11 +917,155 @@ def label_segments(db: Session, book_name: str, *,
             continue
         if not label:
             continue
+        if label in used_set:
+            reused += 1
+        else:
+            used_set.add(label)
+            used_sorted = sorted(used_set)   # 新标签即时进菜单
         for r in seg_rows:
             r.plot_label = label
         labeled += 1
+        prev_label = label
     db.commit()
-    return {"segments": len(segs), "labeled": labeled}
+    return {"segments": len(segs), "labeled": labeled,
+            "reused": reused, "new_labels": labeled - reused}
+
+
+def merge_similar_segments(db: Session, book_name: str, *,
+                           threshold: float = 0.86,
+                           only_single: bool = True,
+                           dry_run: bool = False) -> dict:
+    """后处理：相邻且语义相似的段自动合并（08-B7，修「段切太碎」）。
+
+    试点实测：修真四万年 19 段/30 章（平均 1.6 章/段，单章成段过半）。
+    切分 prompt 已强化「优先 3~6 章/段」，本函数是**兜底后处理**，判据刻意保守：
+
+    - 只看**相邻**段对的 embedding 余弦相似度（bge-m3，与聚类同源）；
+    - `only_single=True`（默认）：仅当**至少一侧是单章段**（碎片）才允许合并——
+      成型的 2~6 章段不碰；
+    - 阈值 0.86 高门槛：只在「确实是同一条故事线被切碎」时合并；
+    - 并查集处理链式相邻对（A~B、B~C 都相似才连成一组，避免漂移过并）。
+
+    合并方向：组内**章数最多**的成员段为目标段（保留大单元段号），组内段概拼接；
+    合并后**段号连续重排**（1..N，下游 arc 层依赖段序列）。
+    ⚠️ 段变 = 既有弧标记全部失效 → **该书弧字段整体清空**（arc_summary/raw 一并清，
+    防 04-B15 raw 复燃），需重跑 `--stage arc`（真实调 LLM，属预期成本）。
+    向量不可用 → `skipped=True` 直接返回（与 cluster_arcs 同风格，不硬报错）。
+    """
+    rows = (
+        db.query(ChapterSummaryORM)
+        .filter_by(book_name=book_name)
+        .filter(ChapterSummaryORM.segment_no.isnot(None))
+        .order_by(ChapterSummaryORM.chapter_no)
+        .all()
+    )
+    if len(rows) < 2:
+        return {"skipped": True, "reason": "段数据不足", "merges": []}
+
+    segs: dict[int, list[ChapterSummaryORM]] = {}
+    order: list[int] = []
+    for r in rows:
+        if r.segment_no not in segs:
+            segs[r.segment_no] = []
+            order.append(r.segment_no)
+        segs[r.segment_no].append(r)
+
+    seg_summaries = {
+        no: (srows[0].segment_summary
+             or "。".join(x.summary for x in srows)[:300] or "")
+        for no, srows in segs.items()
+    }
+
+    from app.services import vector_index
+    if not vector_index.enabled(db):
+        return {"skipped": True, "reason": "向量不可用（未配检索 Key）", "merges": []}
+    try:
+        from app.services import embedding_client
+        vectors = embedding_client.embed_texts(
+            [seg_summaries[no] for no in order], db=db)
+    except Exception as e:  # noqa: BLE001
+        return {"skipped": True,
+                "reason": f"向量化失败: {type(e).__name__}: {str(e)[:80]}", "merges": []}
+
+    def _cos(x, y):
+        s = sum(i * j for i, j in zip(x, y))
+        nx = sum(i * i for i in x) ** 0.5
+        ny = sum(j * j for j in y) ** 0.5
+        return s / (nx * ny) if nx and ny else 0.0
+
+    # 相邻对判定 → 并查集（链式：A~B、B~C 都过门槛才成组）
+    parent = {no: no for no in order}
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    qualifying = []
+    for i in range(len(order) - 1):
+        a, b = order[i], order[i + 1]
+        sim = _cos(vectors[i], vectors[i + 1])
+        frag = (len(segs[a]) == 1 or len(segs[b]) == 1) if only_single else True
+        if sim >= threshold and frag:
+            parent[_find(a)] = _find(b)
+            qualifying.append({"pair": [a, b], "sim": round(sim, 4),
+                               "sizes": [len(segs[a]), len(segs[b])]})
+
+    groups: dict[int, list[int]] = {}
+    for no in order:
+        groups.setdefault(_find(no), []).append(no)
+    merge_groups = [g for g in groups.values() if len(g) > 1]
+
+    if not merge_groups:
+        return {"merged_groups": 0, "segments_before": len(order),
+                "segments_after": len(order), "merges": [], "arcs_cleared": False}
+
+    if dry_run:
+        return {"dry_run": True,
+                "merged_groups": len(merge_groups),
+                "segments_before": len(order),
+                "segments_after": len(order) - sum(len(g) - 1 for g in merge_groups),
+                "merges": [{"members": g,
+                            "chapter_sizes": [len(segs[x]) for x in g]}
+                           for g in merge_groups]}
+
+    # 真合并：组内章数最多者为目标段；段概拼接；plot_label 用目标段口径
+    for g in merge_groups:
+        target = max(g, key=lambda no: len(segs[no]))
+        merged_summary = "\n".join(seg_summaries[no] for no in g)
+        target_label = segs[target][0].plot_label
+        for no in g:
+            for r in segs[no]:
+                r.segment_no = target
+                r.segment_summary = merged_summary
+                r.segment_summary_raw = None   # 04-B15：raw 必须同清，防复燃
+                r.plot_label = target_label
+
+    # 段号连续重排（1..N，按章节顺序）
+    new_no = 0
+    last = None
+    for r in rows:
+        if r.segment_no != last:
+            new_no += 1
+            last = r.segment_no
+        r.segment_no = new_no
+
+    # 段变 = 既有弧失效 → 整体清空（含 raw）
+    for r in rows:
+        r.arc_no = None
+        r.arc_name = None
+        r.arc_summary = None
+        r.arc_summary_raw = None
+    db.commit()
+
+    return {"merged_groups": len(merge_groups),
+            "segments_before": len(order),
+            "segments_after": new_no,
+            "merges": [{"members": g,
+                        "chapter_sizes": [len(segs[x]) for x in g]}
+                       for g in merge_groups],
+            "arcs_cleared": True}
 
 
 # ---------------------------------------------------------------------------
@@ -818,7 +1092,8 @@ def _arc_prompt(seg_list: list[dict]) -> str:
 
 
 def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
-               max_tokens: int = 16000, chunk: int = 120) -> dict:
+               max_tokens: int = 16000, chunk: int = 120,
+               provider: str = "deepseek", force: bool = False) -> dict:
     """把情节段归并为故事弧（Phase 7.1 arc 层，2026-09-11）。
 
     **为什么需要这一层**：段（beat）是"事件粒度"，而模板需要的单元是"故事弧"
@@ -828,8 +1103,21 @@ def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
     **模型升档**：Qwen3-8B 做局部概括（机械活）够用，但"看懂全局叙事结构"是强语义任务 →
     用 DeepSeek V4.1 Flash（输入几千 token，一次几厘钱）。
 
-    幂等：每次重算先清空该书的旧 arc 标记。未覆盖的段兜底归入最后一个弧。
+    `provider`（2026-09-15 加）：
+      - `deepseek`（默认）：DeepSeek V4.1 Flash，付费但稳。
+      - `modelscope`：魔搭 Qwen3.8-Flash-Next（125B/6B 激活，262K 上下文），
+        用免费额度（200 次/天）干这笔活最划算 —— **注意它默认开思考，必须显式关**
+        （见 `_ms_post` 说明）。
+    两条路的 prompt / 解析 / 幂等逻辑完全一致，只有 HTTP 端点与思考字段不同。
+
+    **幂等跳过（08-B8③，2026-09-16 加）**：该书全部有段的章**都已带弧** → 直接返回
+    `skipped=True`，**不调 LLM**（`--stage all` 重跑全链路时最容易被这里白烧钱）。
+    部分覆盖（增量灌了新段）→ **不跳**，全量重算 —— 新段必须与旧段一起重归并，
+    弧的边界语义才正确（只归并新段会切错边界）。`force=True` 无视跳过强制重算（CLI --force）。
+    数据幂等不变：每次重算先清空该书的旧 arc 标记。未覆盖的段兜底归入最后一个弧。
     """
+    if provider not in ARC_PROVIDERS:
+        raise ValueError(f"未知的 arc provider: {provider!r}（可选 {ARC_PROVIDERS}）")
     rows = (
         db.query(ChapterSummaryORM)
         .filter_by(book_name=book_name)
@@ -839,6 +1127,18 @@ def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
     rows = [r for r in rows if r.segment_no is not None]
     if not rows:
         return {"arcs": 0, "segments": 0, "error": "没有段数据（请先跑 --stage segment）"}
+
+    covered = sum(1 for r in rows if r.arc_no is not None)
+    if covered == len(rows) and not force:
+        n_arcs = len({r.arc_no for r in rows})
+        logger.info(f"[plot_import] arc 幂等跳过：{book_name} 全部 {len(rows)} 段已有弧"
+                    f"（{n_arcs} 条），未调 LLM。force=True 可强制重算")
+        return {"skipped": True,
+                "reason": f"全部 {len(rows)} 段已有弧（{n_arcs} 条），无需重算",
+                "arcs": n_arcs, "segments": len(rows)}
+    if covered and covered < len(rows):
+        logger.info(f"[plot_import] arc 增量重算：{covered}/{len(rows)} 段已有弧，"
+                    f"新段须与旧段一起重归并 → 全量重算")
 
     segs: dict[int, list] = {}
     for r in rows:
@@ -856,21 +1156,36 @@ def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
         r.arc_no = None
         r.arc_name = None
         r.arc_summary = None
+        # ⚠️ 必须同时清 raw（2026-09-14 修）：apply_replacement 优先用 *_raw 作源，
+        # 若旧 raw 留着，弧后补扫会把**上一次的弧文本**写回来覆盖新生成的 arc_summary。
+        r.arc_summary_raw = None
     db.commit()
 
-    key = ds_key(db)
-    if not key:
-        raise RuntimeError("未配置 DeepSeek Key（app_configs.llm.deepseek_key）")
+    # ── provider 分派：只有端点 / 思考字段 / 记账 scene 不同，其余逻辑共用 ──
+    if provider == "modelscope":
+        key = ms_key(db)
+        if not key:
+            raise RuntimeError("未配置魔搭 Key（app_configs.llm.modelscope_key）")
+        _post = _ms_post
+        scene = "ms_arc"
+    else:
+        key = ds_key(db)
+        if not key:
+            raise RuntimeError("未配置 DeepSeek Key（app_configs.llm.deepseek_key）")
+        _post = _ds_post
+        scene = "ds_arc"
     rate = rate or RateLimiter()
 
     # 分批归并：段数多了单次输出会超过 max_tokens 被**截断** → JSON 解析失败
     # （2026-09-11 实测教训：斗破 84 段一次归并，max_tokens=3000 直接截断，arcs 全丢）
     batches = [seg_list[i:i + max(1, chunk)] for i in range(0, len(seg_list), max(1, chunk))]
+    logger.info(f"[plot_import] arc 归并 provider={provider}｜{len(seg_list)} 段 → "
+                f"{len(batches)} 批｜max_tokens={max_tokens}")
     arcs: list[dict] = []
     raws: list[str] = []
     for b in batches:
-        raw = _ds_post(key, _arc_prompt(b), max_tokens=max_tokens, rate=rate,
-                       on_usage=make_usage_cb("ds_arc"))
+        raw = _post(key, _arc_prompt(b), max_tokens=max_tokens, rate=rate,
+                    on_usage=make_usage_cb(scene))
         raws.append(raw)
         got = (parse_json_loose(raw) or {}).get("arcs") or []
         if not got:

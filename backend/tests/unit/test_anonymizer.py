@@ -105,6 +105,26 @@ class TestReplacement:
         r2 = test_db.query(ChapterSummaryORM).one()
         assert r2.summary_raw == first_raw                  # raw 不被已匿名文本覆盖
 
+    def test_arc_reignite_rescued_by_replacement(self, test_db):
+        """弧阶段复燃的补扫（2026-09-14 实测场景，北派「孙家兄弟」/蛊真人「花酒行者」）。
+
+        弧是最后一个 LLM 阶段：它产出的 arc_summary 是**新文本**，从未经过匿名化，
+        且 LLM 会在匿名输入上「认出」原著把真名写回。此测试钉住：用**现有映射**
+        再跑一次 apply_replacement 必须能清掉 arc_summary 里的真名（零 LLM 成本）。
+        """
+        _mk(test_db, "书", [1], {1: "主角登场"})
+        r = test_db.query(ChapterSummaryORM).one()
+        r.arc_summary = "萧炎与云岚宗谈判，要求交出孙家兄弟"      # 复燃文本（含真名）
+        test_db.commit()
+        rep = az.apply_replacement(test_db, "书", [
+            {"original": "萧炎", "alias": "主角"},
+            {"original": "云岚宗", "alias": "敌·宗门1"},
+            {"original": "孙家兄弟", "alias": "友·配角34"}])
+        r2 = test_db.query(ChapterSummaryORM).one()
+        assert r2.arc_summary == "主角与敌·宗门1谈判，要求交出友·配角34"
+        assert rep["touched"] == 1
+        assert r2.arc_summary_raw == "萧炎与云岚宗谈判，要求交出孙家兄弟"  # raw 备份
+
 
 class TestAnonymizeBook:
     def test_full_pipeline(self, test_db, monkeypatch):

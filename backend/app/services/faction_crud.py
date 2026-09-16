@@ -63,6 +63,41 @@ def get_faction(db: Session, project_id: str, faction_id: str):
     )
 
 
+def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -> dict:
+    """把抽取的 new_entities 里 kind=faction 的条目自动落 factions 表（任务③批次2，幂等）。
+
+    与 relations 的区别：势力没有外键指向问题（不需要解析 id），可以放心自动落；
+    character/location 仍走人工确认（错建角色/地点的清理成本高）。重名跳过——
+    势力描述的更新是低频人工动作，AI 自动覆盖 brief 反而会稀释人工维护的内容。
+
+    只 add + flush 不 commit（调用方统一提交）。返回统计 {created, skipped}。
+    """
+    stats = {"created": 0, "skipped": 0}
+    for item in new_entities or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "").strip().lower() != "faction":
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            stats["skipped"] += 1
+            continue
+        dup = db.query(FactionORM).filter_by(project_id=project_id, name=name).first()
+        if dup is not None:
+            stats["skipped"] += 1
+            continue
+        brief = str(item.get("brief") or "").strip()
+        now = _now()
+        db.add(FactionORM(
+            id=uuid.uuid4().hex, project_id=project_id,
+            name=name, description=brief or None,
+            members=[], status=None, created_at=now, updated_at=now,
+        ))
+        db.flush()
+        stats["created"] += 1
+    return stats
+
+
 def update_faction(
     db: Session, project_id: str, faction_id: str, data: FactionUpdate
 ) -> Faction | None:

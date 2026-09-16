@@ -20,6 +20,8 @@
 
 **人工确认**：本模块产出的一律是 `draft`；审核通过由人改 `status="reviewed"`（或删除）。
 """
+import hashlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -27,6 +29,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models.orm import BookAliasORM, ChapterSummaryORM, PlotTemplateORM
+from app.services import app_config
 from app.services import plot_template_crud as tpl_crud
 from app.services import vector_index
 from app.services.anonymizer import anonymize_text
@@ -381,6 +384,17 @@ def distill_template(db: Session, arcs: list[dict], *, name_hint: str | None = N
     if not key:
         raise RuntimeError(f"未配置 DeepSeek Key（app_configs.{DS_KEY_CONFIG}）")
 
+    # ⚠️ LLM 调用前结束 Session 事务（2026-09-14 修，记账锁的真正根因）：
+    # SQLAlchemy 2.0 的 Session 是 **autobegin** —— distill_all 里 collect_arcs/cluster_arcs
+    # 的 SELECT 会开一个**长读事务**并一直挂着（直到 commit/rollback）。而用量记账回调是在
+    # `_ds_post` 内**同步**执行的（同线程）→ 它的独立 Session 去写 `llm_usage_logs` 时，
+    # 与这个悬挂读事务撞 SQLite 锁 → 整轮记账全丢（实测 38/38 失败；光在回调里重试没用，
+    # 因为主线程事务要挂到下一组才结束）。arcs 是内存 dict，rollback 不影响它们。
+    try:
+        db.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+
     # LLM 偶发格式问题（如输出被截断）→ 重试一次，避免"偶尔一次坏输出就丢一组"
     raw, data = "", {}
     for attempt in range(2):
@@ -426,34 +440,82 @@ def distill_template(db: Session, arcs: list[dict], *, name_hint: str | None = N
 # ---------------------------------------------------------------------------
 # 4. 一键流程：聚类 → 逐组凝练 → 入库
 # ---------------------------------------------------------------------------
+def _distill_fingerprint(db: Session, book_names: list[str] | None,
+                         threshold: float, min_arcs: int) -> str:
+    """凝练输入指纹（08-B8③，2026-09-16）：弧集合 + 聚类参数任一变化则指纹变。
+
+    指纹 = sha256(书池 + threshold + min_arcs + collect_arcs 全量输出)。
+    输入没变 → 重跑只会产出等价的组 → 纯烧钱 → 跳过。`default=str` 兜底日期等非 JSON 类型。
+    """
+    arcs = collect_arcs(db, book_names)
+    payload = {
+        "books": sorted(book_names) if book_names else None,
+        "threshold": threshold,
+        "min_arcs": min_arcs,
+        "arcs": arcs,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def distill_all(db: Session, *, book_names: list[str] | None = None,
                 threshold: float = CLUSTER_THRESHOLD,
-                min_arcs: int = 1, replace_drafts: bool = True) -> dict:
+                min_arcs: int = 1, replace_drafts: bool = True,
+                force: bool = False) -> dict:
     """聚类全部弧 → 每组凝练一个模板 → 入库（draft）。
 
     `min_arcs` 可过滤太小的组（如只要"至少 2 个弧才算跨书套路"时设 2）。
-    `replace_drafts=True`（默认）会**先清掉所有 draft 模板再重建** —— 避免反复跑时重复堆积；
+    `replace_drafts=True`（默认）会**先清掉 draft 模板再重建** —— 避免反复跑时重复堆积；
     `status="reviewed"`（人工审核过）的模板**不受影响**。
+
+    **按池清理（2026-09-14 加）**：`book_names` 给定时，只清「来源书与本池有交集」的 draft
+    —— 支持「按题材分池多次跑」各池互不干扰（否则跑历史池会把玄幻池的 draft 一起清掉）；
+    `book_names=None`（全库跑）仍清全部 draft。`source_stats.book_names` 是唯一判据。
     失败单组不中断整体（记录在结果里，含原始输出片段便于排查）。
+
+    **幂等跳过（08-B8③，2026-09-16 加）**：弧集合与聚类参数都与上次成功运行一致
+    （指纹存 `app_configs: plot_distill.fingerprint.{池}`）→ 直接返回 `skipped=True`，
+    **不调 LLM**。指纹在**每次跑完**后更新（含部分失败——失败组重试用 `force=True`）。
+    指纹检查在一切清理/LLM 动作**之前**，避免「指纹一致却已清了 draft」的中间状态。
     """
+    pool_key = "|".join(sorted(book_names)) if book_names else "all"
+    fp_key = f"plot_distill.fingerprint.{pool_key}"
+    fp = _distill_fingerprint(db, book_names, threshold, min_arcs)
+    if not force and app_config.get(db, fp_key) == fp:
+        logger.info(f"[plot_distill] 幂等跳过：凝练输入未变化（指纹一致），pool={pool_key}。"
+                    f"force=True 可强制重跑")
+        return {"skipped": True,
+                "reason": "凝练输入未变化（弧集合与聚类参数均与上次一致）",
+                "groups": 0, "created": 0, "templates": [], "failed": [],
+                "fingerprint": fp}
+
     if replace_drafts:
         # ⚠️ 连带清向量（2026-09-13 修）：`query().delete()` 是**批量 SQL**，绕过 ORM 的
         # 对象级钩子 —— 只删行不清 `vector_chunks` 的话，每重跑一次 distill 就往全局
         # 池子里积一批**指向已不存在模板**的孤儿块（模板块 + cast 块两套）。
         # 后果不只是"浪费空间"：全局 KNN 的 top-k 名额会被这些死块挤占，
         # 而且 cast 孤儿块在选角时反查 `structure["cast"][idx]` 会直接取到错位/越界。
-        old_ids = [r[0] for r in db.query(PlotTemplateORM.id).filter_by(status="draft").all()]
+        pool = set(book_names) if book_names else None
+        cand = db.query(PlotTemplateORM).filter_by(status="draft").all()
+        if pool is not None:
+            cand = [t for t in cand
+                    if set((t.source_stats or {}).get("book_names") or []) & pool]
+        old_ids = [t.id for t in cand]
         for tid in old_ids:
             try:
                 vector_index.remove_source(db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE, tid)
                 vector_index.remove_source(db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_CAST, tid)
+                vector_index.remove_source(db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_ARCHETYPE, tid)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[plot_distill] 清理 draft 向量失败 id={str(tid)[:8]}: "
                                f"{type(e).__name__}: {e}")
-        n = db.query(PlotTemplateORM).filter_by(status="draft").delete(synchronize_session=False)
-        db.commit()
-        if n:
-            logger.info(f"[plot_distill] 清理旧 draft 模板 {n} 个（reviewed 不动）+ 其向量块")
+        if old_ids:
+            db.query(PlotTemplateORM).filter(
+                PlotTemplateORM.id.in_(old_ids)).delete(synchronize_session=False)
+            db.commit()
+            logger.info(f"[plot_distill] 清理旧 draft 模板 {len(old_ids)} 个"
+                        f"（reviewed 不动{'' if pool is None else '；池内来源 ' + str(sorted(pool))}）"
+                        f" + 其向量块")
 
     arcs = collect_arcs(db, book_names)
     groups = cluster_arcs(db, arcs, threshold=threshold)
@@ -475,6 +537,8 @@ def distill_all(db: Session, *, book_names: list[str] | None = None,
             logger.warning(f"[plot_distill] 组「{g['suggest_name']}」凝练失败: "
                            f"{type(e).__name__}: {e}")
             failed.append({"group": g["suggest_name"], "reason": f"{type(e).__name__}: {e}"})
+    # 跑完就更新指纹（含部分失败）——「这套输入已经跑过了」；失败组要重试请用 force=True
+    app_config.set_value(db, fp_key, fp)
     return {"groups": len(groups), "created": len(created),
             "templates": created, "failed": failed}
 

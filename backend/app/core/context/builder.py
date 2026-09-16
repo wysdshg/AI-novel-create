@@ -33,12 +33,16 @@ BASE_SYSTEM = (
     "6. ⚠️【严禁复读】同一句完整描述（≥12字）、同一动作、同一心理活动、同一人物反应，"
     "在全章中绝不可原文重复出现；如需呼应前文，必须换用不同词句或不同视角改写，不得照搬。\n"
     "7. ⚠️【对话推进】每段对话必须带来新信息或新冲突，禁止用「他说/她说」来回重复同一套问答；"
-    "对话标签必须多样化（道/低声道/沉声/冷笑/缓缓/截口/摇头），不得连续使用同一标签。\n"
+    "每个说话者的身份、情绪、性格必须能从台词本身辨认出来（措辞、称呼、语气、话长都可以是载体）；"
+    "对话标签只是补位工具，情绪与性格不许只靠标签交代。\n"
     "8. ⚠️【节奏】每 2~3 个段落必须推进剧情或揭示一项新事实，禁止原地打转、"
     "禁止用不同问句包装同一个问题反复发问。\n"
     "9. ⚠️【格式要求】正文须全程使用中文标点（逗号、句号、顿号、引号、冒号、破折号、省略号），"
-    "每 40 字内至少出现一处标点；按场景转换、对话、动作切换自然换段，单段不超过 4 行，"
-    "对话与动作交替时及时分段；内心独白、回忆、梦境同样用中文标点正常断句换段。\n"
+    "每 40 字内至少出现一处标点；按场景转换、对话、动作切换自然换段；"
+    "一般叙述段写 2~4 句（约 40~120 字），把环境、感知、动作的展开过程写足；"
+    "战斗、追逐、对峙等紧张场景允许单句成段，但连续单句段不得超过 3 个，"
+    "之后须接一段完整的叙述或对话；换段是为了节奏，不是逐句切分；"
+    "内心独白、回忆、梦境同样用中文标点正常断句换段。\n"
 )
 
 # [MARK: DOC-ID-LOAD-SAFETY] 本系统提示词中任何「禁止暴露内部标记/id」的禁令，
@@ -231,15 +235,63 @@ def build_chapter_messages(
     else:
         task_lines.append("作者未指定要点，请依据上方商讨记录与前情，推进最合理的下一步剧情。")
     task_lines.append(
-        f"目标字数 {word_range.get('min', 3000)}~{word_range.get('max', 5000)} 字，"
-        "宁可写透一个场景，也不要为凑字数注水。"
+        f"本章正文不少于 {word_range.get('min', 3000)} 字（硬性要求，写不满即不合格）；"
+        "写透场景=写足细节与展开过程，不等于提前收束。"
     )
     task_lines.append(
         "写作纪律（违反即作废）：① 不得原文重复任何≥12字的句子/动作/心理描写；"
         "② 对话须每段推进新信息，禁止用同一套问答反复拉扯；"
         "③ 每 2~3 段必须推进剧情或揭示新事实，不得原地打转；"
-        "④ 必须正确使用中文标点并自然分段，单段不超过 4 行，对话与动作交替时及时换段；"
+        "④ 必须正确使用中文标点并自然分段；一般叙述段 2~4 句（约 40~120 字），"
+        "紧张场景允许单句成段但不得连续超过 3 个，换段≠逐句切分；"
         "⑤ 正文须为纯中文，严禁夹带英文单词/拉丁字母（如 reasonable、possible 之类），否则作废。"
+    )
+    # 2026-09-13 加：分段形态 few-shot 示范——Qwen3.8-Flash 对「网文=一句一段」先验极强，
+    # 抽象指令（2~4 句/40~120 字）实测无效（段均 12.0→12.6），模型对「照示例模仿」的遵循
+    # 远高于「遵守规则」，故给整段排版形态的正反示范，压在 user 消息末尾（注意力最高位）。
+    task_lines.append(
+        "【分段形态示范——硬性要求，分段照此逐字模仿（只学分段形态，不学词句内容）】\n"
+        "正确形态（一般叙述段 2~4 句、约 40~120 字一段）：\n"
+        "他绕过照壁，院里的灯已经灭了。廊下的水缸结了层薄冰，缸沿搭着半截晾绳。"
+        "他伸手碰了碰缸沿，凉意顺着指缝爬上手背。里屋传来一声咳嗽，又归于安静。\n"
+        "对面的门开了条缝。门缝后的人盯着他看了半晌，才侧身让开，门轴吱呀一声。\n"
+        "错误形态（逐句分段），一个字都不许模仿：\n"
+        "他绕过照壁。\n"
+        "院里的灯已经灭了。\n"
+        "廊下的水缸结了层薄冰。\n"
+        "本章正文里，非战斗/追逐/对峙处的段落一律按正确形态；单句成段只许出现在紧张场景，连续不超过 3 个。"
+    )
+    # 2026-09-13 加：对话形态 few-shot 示范——AI 台词条均仅 7.3 字（真实 18.1）、语气词密度
+    # 只有真实 1/3、审讯式乒乓 7/20 串、全员同腔（根因：对话指令全是删减型，0 条正面教）。
+    # 与分段示范同款打法：自写古风示例防污染 + 正反形态对照 + 只学形态不学词句。
+    task_lines.append(
+        "【对话形态示范——硬性要求，照此模仿说话形态（只学形态，不学词句内容）】\n"
+        "正确形态一（交锋戏：台词有长短、有潜台词、有称呼变化、情绪在措辞里）：\n"
+        "「师父闭关前留下的丹方，你从哪儿拿到的？」陆云舟把纸条推回桌角，声音压得很低。\n"
+        "「拾来的。」\n"
+        "「拾来的？」陈守拙冷笑一声，「丹房三年钥匙都没摸过的人，拾到我的私章？」\n"
+        "「陈师兄说笑了。」陆云舟端起茶盏吹了吹，「许是师父怜我笨，特意放在我看得见的地方。」\n"
+        "「你——」陈守拙指着他，半天没把话说下去，转身到门口又停住，「丹房的火，三日后就该熄了。你自己掂量。」\n"
+        "正确形态二（日常戏：台词有拉扯、有性格、有生活逻辑）：\n"
+        "「三文钱，不能再多了。」老太太把菜叶翻来覆去看了三遍，「蔫成这样，喂兔子都嫌。」\n"
+        "「婶子，早上刚摘的，露水还没干呢。」\n"
+        "「露水？我卖了四十年菜，还看不出这褶子是压出来的？」老太太把菜放回去，手却没缩回来，「两文，我挑回家还得给孙子择叶。」\n"
+        "「……五文，送您两根葱。」\n"
+        "「四文，葱归我，秤给你高高的。」\n"
+        "「成交。」\n"
+        "错误形态（审讯式乒乓），一个字都不许模仿：\n"
+        "「丹方哪来的？」\n"
+        "「拾来的。」\n"
+        "「谁给你的？」\n"
+        "「师父。」\n"
+        "「放在哪了？」\n"
+        "「桌角。」\n"
+        "本章正文里，除刑讯/紧急盘问外，对话一律按正确形态：一条台词一般 8~25 字，"
+        "倾诉、解释、情绪爆发可到 40~60 字；连续两条不超过 6 字的对话之后，必须接一条完整台词或叙述破局；"
+        "台词里可以有语气词（哼/啧/呢/吧/罢了）和半截话，让每个人说话的方式各不相同。"
+        "对话轮次服务剧情，不为凑字数反复拉扯；砍掉重复轮次省下的字数，"
+        "用叙述和更完整的台词补回来，全章字数硬要求不变。"
+        "示例里出现的任何词句（含「拾来的」「捡的」「成交」等短语）都不得原样写进正文，只许学说话的形态。"
     )
     _add(_mk("task", "【本章任务】", "\n".join(task_lines),
              P_CRITICAL, order=90, required=True))
@@ -254,9 +306,10 @@ def build_chapter_messages(
         sys_parts.append(skill_block)
 
     if app_config.get(db, app_config.KEY_HUMANIZE_INJECT, True):
-        # 本地小模型规则一多就开始漏，tight 档只给最毒的四条
-        h_level = "light" if level == "tight" else "normal"
-        sys_parts.append(humanizer.build_prompt_block(scene="novel", level=h_level))
+        # 2026-09-13 拍板：normal 档的禁令+写法准则与「去AI味·网文正文」SKILL 内容大量重复，
+        # 双份「删减指令」把模型推向过度节俭（实测段均 12 字、句句成段）。
+        # 统一降为 light：只保留最毒的 4 条句式禁令做双保险，完整纪律以 SKILL 为准。
+        sys_parts.append(humanizer.build_prompt_block(scene="novel", level="light"))
 
     system = "\n\n".join(p for p in sys_parts if p and p.strip())
 
@@ -307,10 +360,31 @@ def build_discussion_system(
         if b is not None:
             blocks.append(b)
 
+    # ---------- 0. 实体识别 + 一跳扩展（08-B11：A5 GraphRAG 扩展到商讨路径）----------
+    # 章节生成路径早有此能力（本文件 :184），商讨此前一直没接：作者问「张三的师父是谁」，
+    # 张三的师父在 layer_characters 里只是一行简写 → 顾问只能现编。
+    # 现在把**作者问题里提到的实体**做图扩展（师父/同门/所属宗门/关联地点提升为 focus），
+    # 这些实体就会拿到全量人设/势力描述。仅对 query_text 生效（用户在问什么才扩展什么）。
+    mentions: dict[str, set[str]] = {
+        "characters": set(), "factions": set(), "locations": set(),
+    }
+    graph_trace: dict = {}
+    if (query_text or "").strip():
+        mentions = layers.extract_mentions(db, project_id, query_text)
+        try:
+            from app.services import entity_graph
+            if entity_graph.enabled(db):
+                mentions, graph_trace = entity_graph.expand(db, project_id, mentions)
+            else:
+                graph_trace = {"enabled": False, "reason": "配置关闭"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[context.builder] 商讨实体图扩展跳过: {type(e).__name__}: {str(e)[:80]}")
+            graph_trace = {"enabled": True, "error": f"{type(e).__name__}: {str(e)[:80]}"}
+
     # 设定库改为 B 方案：目录 + 按需加载，不再把 description 常驻注入 system。
     # 目录由 build_setting_catalog 生成并附在 system 末尾，详情按 LOAD_SETTING 拉取。
-    _add(layers.layer_characters(db, project_id))
-    _add(layers.layer_entities(db, project_id))
+    _add(layers.layer_characters(db, project_id, focus_names=mentions.get("characters")))
+    _add(layers.layer_entities(db, project_id, focus=mentions))
     _add(layers.layer_foreshadows(db, project_id))
     _add(layers.layer_stage_summaries(db, project_id, ref_no))
     _add(layers.layer_recent_memories(db, project_id, ref_no, limit=5))
@@ -352,5 +426,7 @@ def build_discussion_system(
         "budget": plan.debug(),
         "skills": skill_dispatch.explain(db, "discussion"),
         "system_chars": len(system),
+        # 观测一致性：与章节生成路径同键（08-B11），前端/日志可看「这次商讨扩展了谁」
+        "entity_graph": graph_trace,
     }
     return system, meta

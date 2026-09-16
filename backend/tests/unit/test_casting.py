@@ -90,7 +90,7 @@ class TestCastIndexing:
         # chunk_idx == cast 下标 的顺序契约
         assert "退婚的未婚妻" in texts[1]
 
-    def test_delete_clears_both_source_types(self, test_db, monkeypatch):
+    def test_delete_clears_all_source_types(self, test_db, monkeypatch):
         t = _mk_template(test_db)
         pid = "__global__"
         store = BruteVectorStore()
@@ -103,11 +103,29 @@ class TestCastIndexing:
                       source_type=tpl.SOURCE_TYPE_CAST, source_id=t.id,
                       chunk_idx=0, chunk_text="槽位块", model="fake",
                       vector=[0.0, 1.0]),
+            VectorRow(chunk_id=uuid.uuid4().hex, project_id=pid,
+                      source_type=tpl.SOURCE_TYPE_ARCHETYPE, source_id=t.id,
+                      chunk_idx=0, chunk_text="原型块", model="fake",
+                      vector=[1.0, 1.0]),
         ]
         store.upsert(test_db, rows)
         assert tpl.delete(test_db, t.id) is True
         left = test_db.query(VectorChunkORM).filter_by(source_id=t.id).count()
-        assert left == 0, "删模板必须把 plot_template 与 plot_cast 两套向量都清掉"
+        assert left == 0, "删模板必须把 plot_template / plot_cast / char_archetype 三套向量都清掉"
+
+    def test_archetype_chunks_exclude_srcs(self, test_db):
+        """原型块文本 = slot+desc+mode，**不含 srcs**（与 cast 块的形态区分，2026-09-15）。"""
+        t = _mk_template(test_db)
+        casts = tpl.structure_casts(t)
+        arch = tpl.archetype_chunks(t)
+        cast = tpl.cast_chunks(t)
+        assert len(arch) == len(casts) == len(cast)   # 顺序契约：下标一一对应
+        for i, c in enumerate(casts):
+            assert c["slot"] in arch[i] and f"定位：{c['mode']}" in arch[i]
+            for s in c.get("srcs") or []:
+                if s.get("desc"):
+                    assert s["desc"] not in arch[i], "原型块不得掺 srcs 具体实现"
+                    assert s["desc"] in cast[i], "cast 块必须掺 srcs（两路形态必须不同）"
 
     def test_distill_replace_drafts_clears_vectors(self, proj, monkeypatch):
         """回归：distill_all 的批量 delete 绕过钩子 → 必须显式清向量（2026-09-13 修）。"""
@@ -122,13 +140,16 @@ class TestCastIndexing:
         db.add(VCO(id=uuid.uuid4().hex, project_id="__global__",
                    source_type=tpl.SOURCE_TYPE_CAST, source_id=tid, chunk_idx=0,
                    chunk_text="x", model="fake", dim=2, embedding_json="[0,1]"))
+        db.add(VCO(id=uuid.uuid4().hex, project_id="__global__",
+                   source_type=tpl.SOURCE_TYPE_ARCHETYPE, source_id=tid, chunk_idx=0,
+                   chunk_text="x", model="fake", dim=2, embedding_json="[1,1]"))
         db.commit()
-        assert db.query(VCO).filter_by(source_id=tid).count() == 2
+        assert db.query(VCO).filter_by(source_id=tid).count() == 3
         # collect_arcs 没数据 → groups 为空 → 只触发清理路径
         r = pd.distill_all(db)
         assert r["groups"] == 0
         assert db.query(VCO).filter_by(source_id=tid).count() == 0, \
-            "replace_drafts 清 draft 模板时必须连带清掉两套向量块"
+            "replace_drafts 清 draft 模板时必须连带清掉三套向量块"
 
 
 # ---------------------------------------------------------------------------

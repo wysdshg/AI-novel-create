@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import CharacterORM, FactionORM, LocationORM, RelationORM, SkillORM
+from app.models.orm import ChapterMemoryORM, CharacterORM, FactionORM, LocationORM, RelationORM, SkillORM
 from app.schemas.database import Character, CharacterCreate, CharacterUpdate
 
 
@@ -102,6 +102,10 @@ def delete_character(db: Session, project_id: str, character_id: str) -> bool:
       - `skills`：`owner_id` 指向该角色的技能
       - `locations.related_ids` / `factions.members` / `factions.leader_id`：JSON/字段里的引用
     注意 relations/skills 按 `project_id` 一起过滤，避免跨作品误删。
+
+    R5（2026-09-15）：补清 `chapter_memories.characters`（JSON 列存角色**名字符串**）。
+    该列是「AI 记得前文」的注入源——角色删了名字还留在历史章记忆里，
+    下一章注入前情时幽灵复活（选角候选/一致性上下文都读它）。
     """
     o = get_character(db, project_id, character_id)
     if o is None:
@@ -112,6 +116,13 @@ def delete_character(db: Session, project_id: str, character_id: str) -> bool:
     db.query(RelationORM).filter_by(project_id=project_id).filter(
         (RelationORM.subject_id == character_id) | (RelationORM.object_id == character_id)
     ).delete(synchronize_session=False)
+
+    # 1.5) 章级记忆 characters 列（按名字匹配，与列内存储形态一致）
+    for mem in db.query(ChapterMemoryORM).filter_by(project_id=project_id).all():
+        chars = list(mem.characters or [])
+        kept = [x for x in chars if str(x).strip() != name]
+        if len(kept) != len(chars):
+            mem.characters = kept
 
     # 2) 技能：owner_id 指向该角色
     db.query(SkillORM).filter_by(project_id=project_id, owner_id=character_id).delete(

@@ -35,6 +35,11 @@ SOURCE_TYPE = "plot_template"
 # 模板块回答"这个套路是什么"，cast 块回答"这个功能位要什么样的人" ——
 # 混在一个 source_type 里做 KNN，选角查询会被 beat 文本淹没。
 SOURCE_TYPE_CAST = "plot_cast"
+# 角色原型库（2026-09-15）：cast 槽位的**纯功能**索引空间。与 plot_cast 的区别：
+# plot_cast 块是「slot+desc+mode+srcs 实现」混合文本（给选角阈值匹配用），
+# char_archetype 块是「slot+desc+mode」**不带 srcs** —— 建卡人格参考场景
+# （查询侧 = 角色草稿/人设描述）两边都不该带源书痕迹，文本形态对齐。
+SOURCE_TYPE_ARCHETYPE = "char_archetype"
 
 # RRF 常数（与 A 线 pick_relevant 同源）
 RRF_K = 60
@@ -131,6 +136,28 @@ def cast_chunks(t: PlotTemplateORM) -> list[str]:
     return [cast_slot_text(c) for c in structure_casts(t)]
 
 
+def archetype_text(c: dict) -> str:
+    """单个槽位的**原型向量化文本**（角色原型库，2026-09-15）。
+
+    🔴 与 `cast_slot_text` 的关键区别：**不带 srcs**。srcs 是各源书该槽位
+    的具体实现（role_desc），掺进去后块语义被"某本书的具体角色"拉偏；
+    原型库要回答的是"这个功能位要什么样的人"，批次3 建卡时查询侧
+    （新角色草稿/人设描述）同样不带源书痕迹 —— 两边文本形态对齐。
+    `slot` 名前置的理由同 `cast_slot_text`：作者口述常常直接说槽位名。
+    """
+    parts = [str(c.get("slot") or "")]
+    if c.get("desc"):
+        parts.append(str(c["desc"]))
+    if c.get("mode"):
+        parts.append(f"定位：{c['mode']}")
+    return "｜".join(p for p in parts if p.strip())
+
+
+def archetype_chunks(t: PlotTemplateORM) -> list[str]:
+    """原型级切块（每槽位一块），顺序契约同 `cast_chunks`：`chunk_idx == cast 数组下标`。"""
+    return [archetype_text(c) for c in structure_casts(t)]
+
+
 def search_text(t: PlotTemplateORM) -> str:
     """模板级检索/展示文本（目录用）。"""
     parts = [t.name, t.logline or "", " ".join(t.genre_tags or [])]
@@ -143,20 +170,23 @@ def search_text(t: PlotTemplateORM) -> str:
 # 向量化（旁路，失败不影响 CRUD）
 # ---------------------------------------------------------------------------
 def index_template(db: Session, t: PlotTemplateORM) -> int:
-    """重建模板向量（先删旧块再建 模板级 + beat 级 + **cast 级**）。返回块数；失败返回 0（静默）。
+    """重建模板向量（先删旧块再建 模板级 + beat 级 + **cast 级** + **原型级**）。返回块数；失败返回 0（静默）。
 
-    ⚠️ **两个 source_type 都要清**（Phase 7.3 ②）：只清 `plot_template` 会留下
-    `plot_cast` 的孤儿块 —— 槽位改了或 cast 被删光，旧槽位向量还在池子里，
-    选角会召回一个在新 cast 里不存在的下标（反查 `cast[idx]` 直接 IndexError 或错位）。
+    ⚠️ **三个 source_type 都要清**（plot_template / plot_cast / char_archetype）：
+    只清部分会留下孤儿块 —— 槽位改了或 cast 被删光，旧槽位向量还在池子里：
+    plot_cast 孤儿会让选角反查 `cast[idx]` 错位越界；char_archetype 孤儿会让
+    原型检索召回已不存在的槽位（2026-09-15 角色原型库接入第三路）。
     """
     try:
         vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, t.id)
         vector_index.remove_source(db, GLOBAL, SOURCE_TYPE_CAST, t.id)
+        vector_index.remove_source(db, GLOBAL, SOURCE_TYPE_ARCHETYPE, t.id)
         n = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE, t.id, template_chunks(t))
         n_cast = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE_CAST, t.id, cast_chunks(t))
-        if n or n_cast:
-            logger.info(f"[plot_tpl] 模板已向量化 name={t.name} beats={n} cast={n_cast}")
-        return n + n_cast
+        n_arch = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE_ARCHETYPE, t.id, archetype_chunks(t))
+        if n or n_cast or n_arch:
+            logger.info(f"[plot_tpl] 模板已向量化 name={t.name} beats={n} cast={n_cast} archetype={n_arch}")
+        return n + n_cast + n_arch
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plot_tpl] 模板向量化失败（不影响保存）: {type(e).__name__}: {e}")
         return 0
@@ -237,10 +267,11 @@ def delete(db: Session, template_id: str) -> bool:
     o = db.query(PlotTemplateORM).filter_by(id=template_id).first()
     if o is None:
         return False
-    # 两个 source_type 都要清：漏掉 plot_cast 会让槽位向量永久留在全局池里
-    # —— 模板已不存在，但选角仍会召回到它的槽位（Phase 7.3 ②）。
+    # 三个 source_type 都要清：漏掉 plot_cast / char_archetype 会让槽位向量
+    # 永久留在全局池里 —— 模板已不存在，但选角/原型检索仍会召回它的槽位。
     vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, template_id)
     vector_index.remove_source(db, GLOBAL, SOURCE_TYPE_CAST, template_id)
+    vector_index.remove_source(db, GLOBAL, SOURCE_TYPE_ARCHETYPE, template_id)
     db.delete(o)
     db.commit()
     return True

@@ -181,3 +181,59 @@ class TestDistillAll:
         st = pd.distill_all(test_db)
         assert st["created"] == 0 and st["failed"]
         assert "boom" in st["failed"][0]["reason"]
+
+    def test_llm_call_has_no_active_txn(self, test_db, monkeypatch):
+        """LLM 调用时必须**没有活跃事务**（2026-09-14 修，用量记账锁的根因）。
+
+        SQLAlchemy Session 是 autobegin：collect_arcs 的 SELECT 会留一个悬挂读事务，
+        而记账回调在 `_ds_post` 内同步执行 → 独立 Session 写 llm_usage_logs 必撞 SQLite 锁
+        （实测整轮 38/38 记账全丢）。此测试钉住：distill_template 在发起 LLM 调用前已
+        rollback 掉那个读事务。
+        """
+        from unittest.mock import MagicMock
+        from sqlalchemy import text
+        from app.services import plot_template_crud as tpl_crud
+        seen: dict = {}
+
+        def fake_post(k, c, **kw):
+            seen["in_txn"] = test_db.in_transaction()
+            return json.dumps({"name": "X", "structure": {"phases": []}},
+                              ensure_ascii=False)
+
+        monkeypatch.setattr(pd, "ds_key", lambda db: "k")
+        monkeypatch.setattr(pd, "_ds_post", fake_post)
+        monkeypatch.setattr(tpl_crud, "create", lambda db, d: MagicMock(id="x", name=d.get("name")))
+
+        test_db.execute(text("SELECT 1"))          # 制造悬挂读事务
+        assert test_db.in_transaction() is True
+        pd.distill_template(test_db, [{"book": "甲书", "arc_no": 1, "name": "X",
+                                       "summary": "s", "beats": []}])
+        assert seen["in_txn"] is False             # 调用前已 rollback
+
+    def test_pool_scoped_cleanup(self, test_db, monkeypatch):
+        """按池清理（2026-09-14 加）：book_names 给定时只清「来源书在本池」的 draft，
+        池外 draft 与 reviewed 必须保留 —— 这是「按题材分池凝练」的前提，
+        否则跑历史池会把玄幻池的 draft 一起清掉。
+        """
+        from app.services import plot_template_crud as tpl_crud
+        _seed_arcs(test_db, [("甲书", 1, "觉醒", [(1, "诡异", "梦入宗门", [1, 2])])])
+        for name, status, books in [("甲池旧模板", "draft", ["甲书"]),
+                                    ("乙池旧模板", "draft", ["乙书"]),
+                                    ("已审模板", "reviewed", ["甲书"])]:
+            tpl_crud.create(test_db, {"name": name, "status": status,
+                                      "source_stats": {"books": 1, "book_names": books}})
+        monkeypatch.setattr(pd.vector_index, "enabled", lambda db: False)
+        monkeypatch.setattr(tpl_crud, "index_template", lambda db, o: None)
+        monkeypatch.setattr(pd, "ds_key", lambda db: "k")
+        monkeypatch.setattr(pd, "_ds_post", lambda k, c, **kw: json.dumps({
+            "name": "新甲池模板",
+            "structure": {"phases": [{"phase": "开局", "beats": []}]},
+        }, ensure_ascii=False))
+
+        st = pd.distill_all(test_db, book_names=["甲书"], min_arcs=1)
+
+        names = {t.name for t in test_db.query(PlotTemplateORM).all()}
+        assert "甲池旧模板" not in names      # 本池 draft → 被清
+        assert "乙池旧模板" in names          # 池外 draft → 保留
+        assert "已审模板" in names            # reviewed → 永不动
+        assert st["created"] == 1             # 甲书那条弧凝练出 1 个新模板

@@ -8,11 +8,13 @@
 
 阶段（建议按书分开跑，出问题好定位）：
   summarize  逐章概括（最慢，幂等断点续跑：中断后重跑同一命令自动跳过已完成章）
-  anonymize  专名匿名化（**已并入 all**；单独跑用于补跑旧数据）
+  anonymize  专名匿名化（**已并入 all**；单独跑用于补跑旧数据。会**重抽映射**，烧 LLM 钱）
+  reanonymize 用**现有映射**补扫 summary/segment/arc 三个字段（**零 LLM 调用**；
+              用于修复"弧阶段复燃"的存量数据 —— 见下方 🔴 2026-09-14 说明）
   segment    情节段切分（重算会清旧段标记）
   label      段分类
   arc        故事弧归并（DeepSeek）
-  all        概括 → **匿名化** → 段 → 分类 → 弧 + 报告（**并行灌数据用这个**）
+  all        概括 → **匿名化** → 段 → 分类 → 弧 → **弧后补扫** + 报告（**并行灌数据用这个**）
   distill    凝练模板（**跨书全局操作**，会重建全部 draft；**只能单点串行跑**）
   full       all + distill（单点跑，一条命令从原文到模板；**禁止并行**）
 
@@ -20,6 +22,14 @@
    导致"概括/段/弧齐全但未匿名"的书接一次 distill 就凝练出**带源书专名**的模板
    （打破「反抄袭门槛：源书专名命中 0」）。现 `all` 已内置，顺序为
    概括 → 匿名化 → 段 → 分类 → 弧（下游都在干净文本上生成）。
+
+🔴 **弧后必须补扫**（2026-09-14 新增）：上面那条只解决了"匿名化在段弧之前"，
+   但**弧是最后一个 LLM 阶段**——它用 DeepSeek 重新产出 `arc_summary`，该文本
+   **从未经过匿名化**。实测（北派 300/300、回明 294/294 行 arc_summary 无 raw 备份）：
+   LLM 在**匿名输入**上会「认出」原著（两本都是知名网文）并把真名写回
+   （「孙家兄弟」「花酒行者」），而 `book_aliases` 里其实**已注册**这些词 ——
+   是清洗时机漏了最后一棒，不是抽取遗漏。故 `all` 现为：
+   概括 → 匿名化 → 段 → 分类 → 弧 → **补扫（用现有映射，零 LLM）** → verify。
 
 防限流：--interval 默认 2.0 秒（**禁止调小**），429/5xx 自动指数退避。
 """
@@ -43,17 +53,26 @@ def main() -> int:
     ap.add_argument("--book-dir", default=None, help="小说章节目录（形如 0001_标题.txt）")
     ap.add_argument("--book-name", default=None,
                     help="入库用书名（断点续跑的幂等键）；distill 阶段省略 = 对全部书凝练")
+    ap.add_argument("--book-names", default=None,
+                    help="**按题材分池凝练**：逗号分隔的多本书（如 \"蛊真人,凡人修仙传,斗破苍穹\"）。"
+                         "仅 distill 用；给了它就按池聚类 + 只清本池源头的 draft（池外 draft 保留）")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=None)
     ap.add_argument("--stage",
-                    choices=["summarize", "segment", "label", "arc", "anonymize",
-                             "distill", "verify", "all", "full"],
+                    choices=["summarize", "segment", "merge-segments", "label", "arc",
+                             "anonymize", "reanonymize", "distill", "verify", "all", "full"],
                     default="all",
                     help="summarize 逐章概括 / anonymize 专名匿名化 / segment 情节段 / "
-                         "label 段分类 / arc 故事弧 / verify 专名残留抽检+覆盖率（纯 SQL，零调用）/ "
+                         "merge-segments 相邻相似段合并（08-B7，修「段切太碎」；⚠️ 会清该书弧标记，"
+                         "需再跑 --stage arc）/ label 段分类 / arc 故事弧 / "
+                         "verify 专名残留抽检+覆盖率（纯 SQL，零调用）/ "
                          "distill 凝练模板（跨书全局，单点跑）/ "
                          "all 概括+匿名化+段+分类+弧+verify+报告（并行灌数据用）/ full = all + distill（单点）")
     ap.add_argument("--batch", type=int, default=10, help="段切分每批章数")
+    ap.add_argument("--arc-provider", default="deepseek", choices=["deepseek", "modelscope"],
+                    help="弧归并用哪家模型：deepseek（默认，付费稳）/"
+                         "modelscope（魔搭 Qwen3.8-Flash-Next，吃免费额度 200 次/天；"
+                         "每本仅 1~5 批调用，最划算；key 存 app_configs.llm.modelscope_key）")
     ap.add_argument("--threshold", type=float, default=0.80,
                     help="弧聚类相似度阈值（distill 用，越大越保守）")
     ap.add_argument("--min-arcs", type=int, default=1,
@@ -63,16 +82,25 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=1,
                     help="并发批次数（默认 1=串行；建议 2~3 —— 瓶颈是等生成，并发才能提速）")
     ap.add_argument("--force", action="store_true",
-                    help="段切分强制清空重算（默认 False = 断点续跑，跳过已完成批次）")
+                    help="段切分强制清空重算（默认 False = 断点续跑，跳过已完成批次）；"
+                         "也作用于 arc 幂等跳过 / distill 指纹跳过（强制重算）")
+    ap.add_argument("--merge-threshold", type=float, default=0.86,
+                    help="相邻段合并的相似度阈值（merge-segments 用，0.86 高门槛：只合并确实被切碎的）")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="merge-segments 只报告将合并哪些段，不写库")
     ap.add_argument("--interval", type=float, default=2.0, help="请求发起最小间隔秒（防限流，禁止调小）")
     ap.add_argument("--out", default=None, help="报告输出路径（默认 outputs/<书名>-导入报告.md）")
     args = ap.parse_args()
 
-    # 校验：distill（跨书凝练）与 verify（纯读库）不需要书目录
-    if args.stage not in ("distill", "verify") and not (args.book_dir and args.book_name):
-        ap.error("--book-dir 与 --book-name 在 summarize/segment/label/arc/anonymize/all/full 阶段必填")
-    if args.stage in ("distill", "verify") and not (args.book_name or args.stage == "distill"):
-        ap.error("--stage verify 必填 --book-name")
+    # 校验：只有真正要**读源 txt** 的阶段才需要 --book-dir。
+    # - distill（跨书凝练）/ verify（纯读库）/ reanonymize（用现有映射补扫）本来就不需要；
+    # - arc / label 也只需要库里的段数据，不需要源目录（2026-09-15 放宽：此前强制
+    #   --book-dir 导致「只想重算弧」必须先指个路径，属于无意义的摩擦）。
+    _NEED_DIR = ("summarize", "segment", "all", "full")
+    if args.stage in _NEED_DIR and not (args.book_dir and args.book_name):
+        ap.error(f"--book-dir 与 --book-name 在 {args.stage} 阶段必填（该阶段要读源 txt）")
+    if args.stage not in ("distill",) and not args.book_name:
+        ap.error(f"--stage {args.stage} 必填 --book-name")
 
     dbmod.init_db()
     db = dbmod.SessionLocal()
@@ -86,17 +114,55 @@ def main() -> int:
         print(f"[anonymize] {st['aliases']} 条映射，触及 {st['touched']}/{st['chapters']} 章")
         print(f"   主角 -> {st['protagonist']} | 境界阶梯 -> {st['realms']}")
 
+    def _run_reanonymize() -> None:
+        """弧后补扫（2026-09-14）：**用现有映射**再替换一遍全部字段，不重抽（零 LLM 成本）。
+
+        为什么需要：`all` 的顺序是 …→ anonymize → segment → label → **arc**，
+        弧是最后一个 LLM 阶段 —— 它用 DeepSeek 重新产出 `arc_summary`，该文本
+        **从未经过匿名化**。实测 LLM 会在匿名输入上「认出」原著并写回真名
+        （北派「孙家兄弟」/ 蛊真人「花酒行者」，两词在 book_aliases 里其实已注册）。
+        `apply_replacement` 幂等，对已清洁字段为 no-op，全程零 LLM 调用。
+        """
+        from app.services import anonymizer
+        mapping = anonymizer.get_aliases(db, args.book_name)
+        if not mapping:
+            print("[reanonymize] 无映射表（先跑 --stage anonymize）")
+            return
+        rep = anonymizer.apply_replacement(db, args.book_name, mapping)
+        print(f"[reanonymize] 用现有 {len(mapping)} 条映射补扫："
+              f"触及 {rep['touched']}/{rep['chapters']} 章（零 LLM）")
+
+    def _distill_books() -> list[str] | None:
+        """distill 的书目范围：--book-names（分池，逗号分隔）> --book-name（单本）> None（全库）。"""
+        if args.book_names:
+            return [b.strip() for b in args.book_names.split(",") if b.strip()]
+        return [args.book_name] if args.book_name else None
+
     def _run_distill() -> None:
         """凝练模板（**跨书全局**：默认 book_names=None；会重建全部 draft，reviewed 不动）。"""
         from app.services import plot_distill
+        from app.models.orm import ChapterSummaryORM
+        from app.services import anonymizer
+        books = _distill_books()
+        # 凝练前补扫（2026-09-14 加）：collect_arcs 把 arc_summary/segment_summary **原样**
+        # 喂给凝练 LLM（只有 cast desc 过了匿名化）——若弧文本有复燃真名，会被直接写进模板。
+        # 用现有映射每本书再洗一遍（零 LLM 成本，幂等）。
+        for b in (books if books
+                  else [x for (x,) in db.query(ChapterSummaryORM.book_name).distinct()]):
+            m = anonymizer.get_aliases(db, b)
+            if m:
+                anonymizer.apply_replacement(db, b, m)
         st = plot_distill.distill_all(
-            db, book_names=[args.book_name] if args.book_name else None,
-            threshold=args.threshold, min_arcs=args.min_arcs)
-        print(f"[distill] {st['groups']} 组 → 入库 {st['created']} 个模板（draft 待人工审核）")
-        for t in st["templates"]:
-            print(f"   · {t['name']}（{t['arcs']} 弧 / {len(t['books'])} 书 / 相似度 {t['avg_sim']}）")
-        for f in st["failed"]:
-            print(f"   ✗ {f['group']}: {f['reason']}")
+            db, book_names=books,
+            threshold=args.threshold, min_arcs=args.min_arcs, force=args.force)
+        if st.get("skipped"):
+            print(f"[distill] ⏭ 跳过：{st['reason']}（--force 可强制重跑）")
+        else:
+            print(f"[distill] {st['groups']} 组 → 入库 {st['created']} 个模板（draft 待人工审核）")
+            for t in st["templates"]:
+                print(f"   · {t['name']}（{t['arcs']} 弧 / {len(t['books'])} 书 / 相似度 {t['avg_sim']}）")
+            for f in st["failed"]:
+                print(f"   ✗ {f['group']}: {f['reason']}")
         print(f"[report] {plot_distill.export_template_report(db)}")
 
     def _run_verify() -> int:
@@ -143,7 +209,8 @@ def main() -> int:
                   f"—— 前 10 条：")
             for n, no, f in hard[:10]:
                 print(f"      · 「{n}」仍出现在第 {no} 章的 {f}")
-            print("      处理：重跑 --stage anonymize（幂等）后再 verify")
+            print("      处理：优先 `--stage reanonymize`（用现有映射补扫，零 LLM 成本）；"
+                  "仍残留再跑 `--stage anonymize`（重抽映射）后复验")
         else:
             print("   ✓ 人物/势力类专名残留 0（反抄袭硬判据通过）")
         if soft:
@@ -162,6 +229,12 @@ def main() -> int:
 
     if args.stage == "anonymize":
         _run_anonymize()
+        print(f"[done] {time.time() - t0:.0f}s")
+        db.close()
+        return 0
+
+    if args.stage == "reanonymize":
+        _run_reanonymize()
         print(f"[done] {time.time() - t0:.0f}s")
         db.close()
         return 0
@@ -203,13 +276,47 @@ def main() -> int:
                                  concurrency=args.concurrency, force=args.force,
                                  rate=rate, progress=_prog2("段切分"))
         print(f"[segment] {st}")
+    if args.stage == "merge-segments":
+        # 相邻相似段合并（08-B7）：只合并「至少一侧是单章碎片且 embedding 相似 ≥ 阈值」的相邻段。
+        # ⚠️ 会清该书弧标记（段变=弧失效）→ 之后需再跑 --stage arc（真实调 LLM）。
+        # 刻意**不并入 all**：对已灌完的书跑 all 会意外清弧 + 重烧弧归并，属惊喜成本，故独立成站。
+        st = pi.merge_similar_segments(db, args.book_name,
+                                       threshold=args.merge_threshold,
+                                       dry_run=args.dry_run)
+        if st.get("skipped"):
+            print(f"[merge-segments] ⏭ 跳过：{st['reason']}")
+        elif st.get("dry_run"):
+            print(f"[merge-segments] 【预览】将合并 {st['merged_groups']} 组："
+                  f"段 {st['segments_before']} → {st['segments_after']}（--dry-run 未写库）")
+            for m in st["merges"]:
+                print(f"   · 段 {m['members']}（各 {m['chapter_sizes']} 章）")
+        elif st.get("merged_groups"):
+            print(f"[merge-segments] 合并 {st['merged_groups']} 组："
+                  f"段 {st['segments_before']} → {st['segments_after']}")
+            for m in st["merges"]:
+                print(f"   · 段 {m['members']}（各 {m['chapter_sizes']} 章）")
+            print("   ⚠️ 弧标记已清 → 请重跑 --stage arc 重建故事弧")
+        else:
+            print(f"[merge-segments] 无可合并的相邻相似段（段 {st['segments_after']} 保持不变）")
+        db.close()
+        print(f"[done] {time.time() - t0:.0f}s")
+        return 0
     if args.stage == "label" or run_all:
         st = pi.label_segments(db, args.book_name, rate=rate)
         print(f"[label] {st}")
     if args.stage == "arc" or run_all:
-        # 故事弧归并：用 DeepSeek V4.1 Flash（升档模型，需 app_configs.llm.deepseek_key）
-        st = pi.merge_arcs(db, args.book_name, rate=rate)
-        print(f"[arc] {st}")
+        # 故事弧归并：默认 DeepSeek V4.1 Flash（升档模型），可用 --arc-provider modelscope 切换
+        # 幂等（08-B8③）：全部段已有弧 → 跳过（不调 LLM）；增量（部分段无弧）→ 全量重算；--force 强制
+        st = pi.merge_arcs(db, args.book_name, rate=rate, provider=args.arc_provider,
+                           force=args.force)
+        if st.get("skipped"):
+            print(f"[arc] ⏭ 跳过：{st['reason']}（--force 可强制重算）")
+        else:
+            print(f"[arc] provider={args.arc_provider} {st}")
+    if run_all:
+        # 弧后补扫（2026-09-14）：弧是最后一个 LLM 阶段，其产出 arc_summary 必须再洗一遍
+        # —— LLM 会在匿名输入上「认出」原著并写回真名（零 LLM 成本，幂等）
+        _run_reanonymize()
 
     bad = 0
     if run_all:

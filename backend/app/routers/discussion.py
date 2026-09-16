@@ -8,6 +8,7 @@
 """
 import logging
 import re
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,7 +20,7 @@ from app.core.response import ok, sse_event
 from app.core.database import get_session
 import app.core.database as _db
 from app.core.context import build_discussion_system, layers
-from app.services import model_crud, character_crud, faction_crud, location_crud
+from app.services import model_crud, character_crud, faction_crud, location_crud, usage_crud
 from app.services.discussion_crud import (
     list_messages,
     add_message,
@@ -547,6 +548,9 @@ def chat(
 
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
+        # adapter 可能创建失败（vendor 配置错等）→ finally 里的用量计量要引用它，先置 None
+        adapter = None
+        _t0 = time.monotonic()
         try:
             adapter = get_adapter(model_cfg["vendor"], config)
             logger.info(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
@@ -605,6 +609,25 @@ def chat(
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[discussion/chat] 观测落库失败: {e}")
+            # ── 用量计量（08-B5）：商讨回合此前不记账 → 观测页统计偏低。Pass1+Pass2 合记一条 ──
+            # last_usage 取值优先级：Pass2 流式若厂商回传则是 Pass2 的；否则是 Pass1 非流式的真实值；
+            # 两者都没有 → record_usage 按字符估算（thinking 也计入 completion —— 思考同样烧 token）。
+            try:
+                if adapter is not None:
+                    usage_crud.record_usage(
+                        gen_db,
+                        scene="discussion",
+                        vendor=model_cfg.get("vendor"),
+                        model_name=model_cfg.get("model_name"),
+                        usage=getattr(adapter, "last_usage", None),
+                        project_id=project_id,
+                        duration_ms=int((time.monotonic() - _t0) * 1000),
+                        ok=True,
+                        prompt_text="".join(str(m.get("content") or "") for m in messages),
+                        completion_text="".join(assistant_text) + "".join(assistant_thinking),
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[discussion/chat] 用量记录失败: {e}")
             # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
             gen_db.close()
 
@@ -797,6 +820,9 @@ def global_chat(
 
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
+        # adapter 可能创建失败 → finally 里的用量计量要引用它，先置 None
+        adapter = None
+        _t0 = time.monotonic()
         try:
             adapter = get_adapter(model_cfg["vendor"], config)
             logger.info(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
@@ -839,6 +865,23 @@ def global_chat(
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[discussion/global-chat] 观测落库失败: {e}")
+            # ── 用量计量（08-B5）：全局对话同商讨（project_id = __global__，见 04-C12 豁免语义）──
+            try:
+                if adapter is not None:
+                    usage_crud.record_usage(
+                        gen_db,
+                        scene="discussion",
+                        vendor=(model_cfg or {}).get("vendor"),
+                        model_name=(model_cfg or {}).get("model_name"),
+                        usage=getattr(adapter, "last_usage", None),
+                        project_id=GLOBAL_PROJECT_ID,
+                        duration_ms=int((time.monotonic() - _t0) * 1000),
+                        ok=True,
+                        prompt_text="".join(str(m.get("content") or "") for m in messages),
+                        completion_text="".join(assistant_text) + "".join(assistant_thinking),
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[discussion/global-chat] 用量记录失败: {e}")
             # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
             gen_db.close()
 

@@ -272,13 +272,17 @@ class TestMergeArcs:
         assert all(x.segment_no is not None and x.arc_no is None for x in rows)
 
     def test_remerge_clears_old_arc(self, test_db, monkeypatch):
-        """重算前必须清旧 arc 标记（否则旧弧号残留产生交错）。"""
+        """重算前必须清旧 arc 标记（否则旧弧号残留产生交错）。
+
+        08-B8③ 后「全部段已有弧」默认幂等跳过 → 本测试语义变为「强制重算」：
+        force=True 时依旧先清旧标记再重建。
+        """
         self._seed(test_db, {1: [1], 2: [2]})
         test_db.query(pi.ChapterSummaryORM).update({"arc_no": 9, "arc_name": "旧的"})
         test_db.commit()
         self._mock_ds(monkeypatch, json.dumps({"arcs": [
             {"segments": [1, 2], "name": "新弧", "summary": "新概括"}]}, ensure_ascii=False))
-        pi.merge_arcs(test_db, "书")
+        pi.merge_arcs(test_db, "书", force=True)
         rows = test_db.query(pi.ChapterSummaryORM).all()
         assert all(x.arc_no == 1 and x.arc_name == "新弧" for x in rows)
 
@@ -291,6 +295,129 @@ class TestMergeArcs:
         except RuntimeError as e:
             raised = "Key" in str(e)
         assert raised, "无 DeepSeek Key 应明确报错"
+
+
+class TestArcProvider:
+    """弧归并 provider 可选（2026-09-15）：deepseek / modelscope 两条路，逻辑共用只换端点。
+
+    重点验证：① 魔搭走 `_ms_post` 且发对思考字段；② 两条路的入参互不串（不能误调 ds_key）；
+    ③ 非法 provider 明确报错；④ 记账 scene 前缀能被 make_usage_cb 正确映射成 vendor。
+    """
+
+    def _seed(self, test_db):
+        test_db.add(pi.ChapterSummaryORM(
+            id="c1", book_name="书", chapter_no=1, summary="第1章概括",
+            segment_no=1, segment_summary="段1概括", plot_label="测"))
+        test_db.commit()
+
+    def test_modelscope_uses_ms_post_and_ms_key(self, test_db, monkeypatch):
+        self._seed(test_db)
+        seen = {}
+
+        def fake_ms(key, content, **kw):
+            seen["key"] = key
+            seen["scene"] = kw.get("on_usage")
+            return json.dumps({"arcs": [{"segments": [1], "name": "弧", "summary": "s"}]},
+                              ensure_ascii=False)
+        monkeypatch.setattr(pi, "ms_key", lambda db: "ms-key")
+        monkeypatch.setattr(pi, "_ms_post", fake_ms)
+        # ds_key / _ds_post 必须**不被调用** —— 挂成会炸的桩来钉住这一点
+        monkeypatch.setattr(pi, "ds_key", lambda db: (_ for _ in ()).throw(
+            AssertionError("provider=modelscope 时不该读 DeepSeek Key")))
+        monkeypatch.setattr(pi, "_ds_post", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("provider=modelscope 时不该调 _ds_post")))
+
+        r = pi.merge_arcs(test_db, "书", provider="modelscope")
+        assert r["arcs"] == 1
+        assert seen["key"] == "ms-key"
+
+    def test_default_provider_is_deepseek(self, test_db, monkeypatch):
+        """不传 provider → 走 DeepSeek（向后兼容，老命令行为不变）。"""
+        self._seed(test_db)
+        called = {"ds": 0}
+        monkeypatch.setattr(pi, "ds_key", lambda db: "ds-key")
+
+        def fake_ds(key, content, **kw):
+            called["ds"] += 1
+            return json.dumps({"arcs": [{"segments": [1], "name": "弧", "summary": "s"}]},
+                              ensure_ascii=False)
+        monkeypatch.setattr(pi, "_ds_post", fake_ds)
+        pi.merge_arcs(test_db, "书")
+        assert called["ds"] == 1
+
+    def test_unknown_provider_raises(self, test_db):
+        self._seed(test_db)
+        try:
+            pi.merge_arcs(test_db, "书", provider="openai")
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, "未知 provider 应明确报错，而不是静默走默认"
+
+    def test_no_ms_key_raises(self, test_db, monkeypatch):
+        self._seed(test_db)
+        monkeypatch.setattr(pi, "ms_key", lambda db: None)
+        try:
+            pi.merge_arcs(test_db, "书", provider="modelscope")
+            raised = False
+        except RuntimeError as e:
+            raised = "魔搭" in str(e) or "Key" in str(e)
+        assert raised, "无魔搭 Key 应明确报错"
+
+    def test_ms_post_body_disables_thinking(self, monkeypatch):
+        """_ms_post 必须发 chat_template_kwargs.enable_thinking=False。
+
+        这是 ModelScope Qwen3.x 的硬坑（docs/04 §B2/B13）：默认思考开，
+        reasoning 会吃光 max_tokens 并污染 content。字段名必须走 chat_template_kwargs
+        （顶层 thinking.type 对魔搭无效）。
+        """
+        captured = {}
+
+        def fake_chat(url, key, body, **kw):
+            captured["url"] = url
+            captured["body"] = body
+            return "{}"
+        monkeypatch.setattr(pi, "_chat_post", fake_chat)
+        pi._ms_post("k", "hello", max_tokens=123)
+        assert "modelscope" in captured["url"]
+        assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+        assert captured["body"]["model"] == pi.MS_MODEL
+        assert captured["body"]["max_tokens"] == 123
+
+
+class TestUsageCbVendorMapping:
+    """记账回调的 scene→vendor/model 映射（2026-09-15 修：新增 ms_ 前缀）。
+
+    回归用例：此前用 startswith("ds_") 二分，ms_arc 会被误记成 siliconflow/Qwen3-8B，
+    成本分析看错账。
+    """
+
+    def test_prefix_mapping(self, monkeypatch):
+        import app.services.usage_crud as usage_crud
+        import app.core.database as database
+        recorded = {}
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(database, "get_engine", lambda: None)
+        monkeypatch.setattr(database, "SessionLocal", _FakeSession)
+
+        def fake_record(db, **kw):
+            recorded.update(kw)
+        monkeypatch.setattr(usage_crud, "record_usage", fake_record)
+
+        for scene, want_vendor, want_model in [
+            ("ds_arc", "deepseek", pi.DS_MODEL),
+            ("ms_arc", "modelscope", pi.MS_MODEL),
+            ("sf_label", "siliconflow", pi.SF_MODEL),
+        ]:
+            recorded.clear()
+            cb = pi.make_usage_cb(scene)
+            cb({"prompt_tokens": 1}, 10, True)
+            assert recorded.get("vendor") == want_vendor, f"{scene} vendor"
+            assert recorded.get("model_name") == want_model, f"{scene} model"
 
 
 class TestReportThreeLevels:
