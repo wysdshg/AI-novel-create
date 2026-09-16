@@ -23,6 +23,7 @@ import SkillListView from '@/views/SkillListView.vue'     // 数据库·技能�
 import EvalView from '@/views/EvalView.vue'               // Phase 4.1 生成评估（版本留档 / 打分 / 对比）
 import ObservabilityView from '@/views/ObservabilityView.vue'  // Phase 4.2/4.3 观测（用量计量 + 反馈回流）
 import PlanView from '@/views/PlanView.vue'                    // Phase 7.5 篇规划（计划/选角/引入单/连续性）
+import NotFoundView from '@/views/NotFoundView.vue'            // 404（2026-09-15，08-B2①）
 
 // =========================================================================
 // 顶部 tab 系统（参考用户大任务截图）
@@ -96,6 +97,11 @@ const routes = [
       { path: 'model-config', name: 'model-config', component: ModelConfigView, meta: { title: '模型配置', hideTab: true } },
     ],
   },
+  // 404 兜底（2026-09-15，docs/08-B2①）：放最后，前面的路由都没匹配上才落到这里。
+  // ⚠️ 必须在 /workspace 之外 —— 放进 children 会让「打错的地址」渲染进主布局里，
+  // 用户看到的是一个空壳侧栏 + 报错，比看到 404 更迷惑。
+  { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView,
+    meta: { title: '页面不存在', hideTopNav: true } },
 ]
 
 const router = createRouter({

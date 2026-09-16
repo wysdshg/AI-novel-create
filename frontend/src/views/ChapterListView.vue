@@ -18,6 +18,20 @@
           <el-radio-button label="drafted">已写</el-radio-button>
           <el-radio-button label="empty">草稿</el-radio-button>
         </el-radio-group>
+        <!-- 导出（08-B2③）：list 接口本就返回完整 content，前端直接拼 txt，零后端改动 -->
+        <el-dropdown @command="onExport" :disabled="!projectId">
+          <el-button :disabled="!projectId">
+            导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="selected" :disabled="!selected.length">
+                导出选中章节（{{ selected.length }}）
+              </el-dropdown-item>
+              <el-dropdown-item command="all">导出全部章节（{{ allChapters.length }}）</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button
           type="danger"
           plain
@@ -148,7 +162,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, Collection, Notebook, Search } from '@element-plus/icons-vue'
+import { Document, Collection, Notebook, Search, ArrowDown } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { chapterApi } from '@/api/chapter'
 
@@ -215,6 +229,60 @@ const rows = computed(() => {
 
 function onSelectionChange(sel) {
   selected.value = sel
+}
+
+// ── 导出 txt（08-B2③）────────────────────────────────────────────
+// list 接口（_chapter_to_dict）本就返回完整 content → 前端直接拼文件，零后端改动。
+// 「全部」从 store.structure 原始数据取（**无视搜索/状态筛选**，导出的是真全本，
+// 而不是「当前筛选后的子集」——后者容易让人以为导出了全本）。
+
+const allChapters = computed(() => {
+  const out = []
+  for (const v of store.structure.volumes || []) {
+    for (const a of v.articles || []) for (const c of a.chapters || []) out.push(c)
+  }
+  return out
+})
+
+function _today() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+}
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function fmtChapters(chs) {
+  return [...chs]
+    .sort((a, b) => (a.chapter_no || 0) - (b.chapter_no || 0))
+    .map((c) => `第${c.chapter_no}章 ${c.title || ''}\n\n${(c.content || '').trim() || '（本章暂无正文）'}`)
+    .join('\n\n\n')
+}
+
+function onExport(cmd) {
+  const name = store.currentNovel?.name || '未命名'
+  if (cmd === 'selected') {
+    const chs = selected.value.filter((r) => r.type === 'chapter')
+    if (!chs.length) return
+    downloadText(`${name}-选中${chs.length}章-${_today()}.txt`, fmtChapters(chs))
+    ElMessage.success(`已导出 ${chs.length} 章`)
+    return
+  }
+  const chs = allChapters.value
+  if (!chs.length) {
+    ElMessage.warning('当前作品还没有章节')
+    return
+  }
+  downloadText(`${name}-全本${chs.length}章-${_today()}.txt`, fmtChapters(chs))
+  ElMessage.success(`已导出全部 ${chs.length} 章`)
 }
 
 // 进入该章工作区（对话页：对话 + 正文 + 走向）

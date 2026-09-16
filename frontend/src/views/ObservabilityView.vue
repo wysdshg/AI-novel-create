@@ -47,6 +47,17 @@
           <div class="obs-card-num">{{ fmtNum(usage.overall?.completion_tokens) }}</div>
           <div class="obs-card-label">输出 token</div>
         </div>
+        <div v-if="hasCache" class="obs-card">
+          <div class="obs-card-num">{{ pct(usage.overall?.cache_hit_rate) }}</div>
+          <div class="obs-card-label">缓存命中率</div>
+        </div>
+      </div>
+
+      <div v-if="hasCache" class="obs-tip">
+        缓存命中的输入 token 单价低得多（DeepSeek 系等）。
+        本区间：命中 <b>{{ fmtNum(usage.overall?.cache_hit_tokens) }}</b> /
+        未命中 <b>{{ fmtNum(usage.overall?.cache_miss_tokens) }}</b>。
+        命中率只统计**厂商确实回传了缓存拆分**的调用，未回传的不计入分母（不假装有数据）。
       </div>
 
       <div v-if="usage.overall?.estimated_calls" class="obs-tip">
@@ -72,6 +83,9 @@
           <el-table-column label="合计" width="110" align="right">
             <template #default="{ row }"><b>{{ fmtNum(row.total_tokens) }}</b></template>
           </el-table-column>
+          <el-table-column v-if="hasCacheIn(usage.by_model)" label="缓存命中率" width="110" align="right">
+            <template #default="{ row }">{{ pct(row.cache_hit_rate) }}</template>
+          </el-table-column>
         </el-table>
 
         <h3 class="obs-h3">按场景</h3>
@@ -80,6 +94,9 @@
           <el-table-column prop="calls" label="次数" width="80" align="right" />
           <el-table-column label="合计 token" width="130" align="right">
             <template #default="{ row }">{{ fmtNum(row.total_tokens) }}</template>
+          </el-table-column>
+          <el-table-column v-if="hasCacheIn(usage.by_scene)" label="缓存命中率" width="110" align="right">
+            <template #default="{ row }">{{ pct(row.cache_hit_rate) }}</template>
           </el-table-column>
         </el-table>
 
@@ -171,6 +188,17 @@ const feedbacks = ref([])
 const projectFilter = computed(() =>
   onlyCurrent.value && store.currentNovelId ? { project_id: store.currentNovelId } : {}
 )
+
+// 缓存拆分只有部分厂商回传（DeepSeek 系给 prompt_cache_hit_tokens，多数厂商不给）。
+// 后端在无数据时返回 cache_hit_rate = None（刻意不假装有数据）→ 前端据此整块隐藏，
+// 避免用户看到一个永久「—」的卡片还以为坏了（2026-09-15，docs/08-B3）。
+const hasCache = computed(() => usage.value?.overall?.cache_hit_rate != null)
+
+// 单张聚合表是否该显示缓存列：**任一行**有缓存数据才显示。
+// 理由：若整表都是「—」，那一列纯属噪声；若部分行有数据，则保留该列（缺数据的行显「—」才有信息量）。
+function hasCacheIn(rows) {
+  return Array.isArray(rows) && rows.some((r) => r?.cache_hit_rate != null)
+}
 
 function fmtNum(n) {
   if (n === null || n === undefined) return '—'

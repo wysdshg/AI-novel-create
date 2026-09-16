@@ -184,7 +184,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Files, Delete, Setting, Document, Notebook, Collection,
-  ChatLineRound, DataAnalysis, TrendCharts, Memo,
+  ChatLineRound, DataAnalysis, TrendCharts, Memo, Grid, Aim,
 } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { volumeApi } from '@/api/volume'
@@ -216,6 +216,14 @@ const globalEntries = [
   { label: '篇规划', icon: Memo, name: 'plan' },
   // 章节列表（全篇章节总览 / 手动编辑）—— 路由早已存在但一直零入口（零入口病第三例）
   { label: '章节列表', icon: Files, name: 'chapters' },
+  // 情节模板库（Phase 7.1，165 个模板 × 2453 章凝练）—— 同上是**零入口病第四例**：
+  // TemplateView.vue + 路由 `template` 早已存在，但侧栏/tab 都没有入口 → 用户根本看不到
+  { label: '模板库', icon: Grid, name: 'template' },
+  // 线索 / 伏笔（2026-09-15，docs/08-B1）—— **零入口病第五例**：
+  // 路由 `foreshadow` 与 ForeshadowView 早已存在，但侧栏/顶栏都没有入口，
+  // 且页面还是写着「Phase 2.1 推进中」的占位页（而 Phase 2.1 在 09-10 就完成并真机验证过）。
+  // 入口必须与真页面同批上线，否则只是把「零入口」换成「有垃圾入口」。
+  { label: '伏笔', icon: Aim, name: 'foreshadow' },
 ]
 function goEntry(entry) {
   router.push({ name: entry.name })

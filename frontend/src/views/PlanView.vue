@@ -309,7 +309,7 @@
       </div>
 
       <!-- 选角面板（7.3） -->
-      <div class="pv-section">
+      <div ref="castingSection" class="pv-section">
         <div class="pv-section-head">
           <h3 class="pv-section-title">角色选角（{{ castings.length }} 个槽位）</h3>
           <div class="pv-section-actions">
@@ -550,6 +550,7 @@ const confirmForm = reactive({ role_type: '', personality: '', background: '', b
 const MIN_SCORE = 0.58   // 与后端 casting_crud 同源（标定表 outputs/选角阈值标定.md）
 
 const locked = computed(() => plan.value?.status === 'confirmed')
+const castingSection = ref(null)
 
 // 篇选项：当前小说结构下的所有篇（跨卷）
 const articleOptions = computed(() => {
@@ -561,7 +562,20 @@ const articleOptions = computed(() => {
 })
 
 // —— 连续性数据（7.3.5，plan JSON 里带出） ——
-const carryoverNames = computed(() => plan.value?.carryover?.carryover_names || [])
+// ⚠️ carryover_names 是**生成时刻的快照**（08-B4②）：用户随后改计划把某人安排出场
+// （或手改行内出场者），横幅还喊「本篇计划里没有任何交代」就是误报。
+// → 按**当前计划行**实时过滤：名字出现在任意行的安排出场/新角色里即视为已交代。
+const scheduledNames = computed(() => {
+  const s = new Set()
+  for (const r of rows.value) {
+    for (const n of splitNames(r._recall)) s.add(n)
+    for (const n of splitNames(r._new)) s.add(n)
+  }
+  return s
+})
+const carryoverNames = computed(() =>
+  (plan.value?.carryover?.carryover_names || [])
+    .filter((n) => !scheduledNames.value.has(n)))
 const carryoverChapters = computed(() => {
   const map = {}
   for (const c of plan.value?.carryover?.last_chapters || []) {
@@ -1005,6 +1019,9 @@ async function recomputeCasting() {
     const r = await castingApi.recompute(novelId.value, articleId.value)
     castings.value = Array.isArray(r) ? r : (r?.castings || [])
     ElMessage.success('选角已重算（manual 槽位未被覆盖）')
+    // 重算后槽位/匹配可能大变，而按钮在选角区标题栏、结果也在同一屏下方
+    // —— 自动滚到选角区，免得用户盯着计划表格猜哪里变了（08-B4③）
+    nextTick(() => castingSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   } catch { /* 拦截器已报错 */ } finally {
     recomputing.value = false
   }
