@@ -1,0 +1,251 @@
+{
+  "project": "AI小说创作智能体",
+  "replace": true,
+  "modules": [
+    {
+      "id": 0,
+      "name": "主流程图",
+      "nodes": [
+        { "id": "S1", "type": "start", "name": "作者开始写作", "description": "打开写作台：或在篇规划页先排整篇计划，或直接进对话页商讨剧情/写下一章", "state": "completed" },
+        { "id": "M1", "type": "module", "name": "核心写作闭环", "description": "商讨→流式生成→安全网把关→写后自动沉淀→下一章自动带上前情/伏笔。全链 e2e 实测可用", "state": "completed", "target": "5", "doc": ".flow/docs/core-writing-loop.md" },
+        { "id": "M2", "type": "module", "name": "阶段A·数据模型大更新", "description": "给实体库加物品/技能/关系网/等级标准，AI 抽取认识新实体，写作时按角色名带出关系网。后端表和迁移已完成，前端分批接入中", "state": "in_progress", "target": "1", "doc": ".flow/docs/stage-a-data-model.md" },
+        { "id": "M3", "type": "module", "name": "阶段F·原子骨架管线", "description": "从七本小说切出原子事件，跨书归并成 75 条通用剧情骨架入库；剩组装演示和 2 个待拍板缺陷", "state": "in_progress", "target": "2", "doc": ".flow/docs/stage-f-skeleton-pipeline.md" },
+        { "id": "M4", "type": "module", "name": "阶段E·全局条目库/尺度库", "description": "让 AI 优先用灵石/筑基丹这类通用词、按类别尺度造新物品新技能。口径已拍板、四表已建库灌库，剩抽取归一/写作注入", "state": "in_progress", "target": "3", "doc": ".flow/docs/stage-e-global-ref.md" },
+        { "id": "M5", "type": "module", "name": "阶段B/C/D·其他规划", "description": "模板库扩容收尾、语气词密度、工具调用POC、分页回收站、文档治理、设定模板改造等零散事项", "state": "to_plan", "target": "4", "doc": ".flow/docs/stage-bcd-misc.md" },
+        { "id": "M7", "type": "module", "name": "篇规划与批量生成", "description": "写一章前先生成整篇计划：模板检索+向量选角+新角色引入单+连续性检查，拍板后一键逐章批量生成。前端+服务层已落地", "state": "completed", "target": "6", "doc": ".flow/docs/plan-batch.md" },
+        { "id": "M6", "type": "process", "name": "质量评估与观测", "description": "每次生成自动留版本可打分对比；token 用量按模型/场景/日期统计（章节/商讨/摄取/指令/离线管线五类场景+缓存命中拆分）；作者改正文自动记反馈", "location": "frontend/src/views/EvalView.vue、ObservabilityView.vue", "state": "completed", "doc": ".flow/docs/eval-observability.md" },
+        { "id": "DB1", "type": "database", "name": "SQLite 单文件库", "description": "存作品/章节/记忆/模板/配置等 27+ 张表，在仓库之外（用户目录 .ai_novel），只存本机", "state": "completed" },
+        { "id": "LLM1", "type": "llm", "name": "模型网关", "description": "统一接各种模型：OpenAI 兼容（魔搭/GLM/硅基流动/DeepSeek）+ Claude + 本地 Ollama；2026-09-25 起本地统一网关（MyAPI）已接入：三路 chat 一把 Key 自动轮换，embedding/rerank 也走网关", "state": "completed", "outputs": ["生成", "离线管线"] }
+      ],
+      "edges": [
+        { "from": "S1", "to": "M1", "text": "打开章节/商讨" },
+        { "from": "S1", "to": "M7", "text": "先排整篇计划" },
+        { "from": "M7", "to": "M1", "text": "逐章生成复用核心端点" },
+        { "from": "M2", "to": "M1", "text": "新实体进上下文注入" },
+        { "from": "M3", "to": "M1", "text": "骨架模板辅助篇规划" },
+        { "from": "M4", "to": "M2", "text": "条目库供抽取归一" },
+        { "from": "M1", "to": "DB1", "text": "章节/记忆落库" },
+        { "from": "M3", "to": "DB1", "text": "骨架入库" },
+        { "from": "LLM1", "to": "M1", "text": "供模型生成" },
+        { "from": "LLM1", "to": "M3", "text": "离线管线批量调用" },
+        { "from": "M1", "to": "M6", "text": "留档/计量/反馈" }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "阶段A·数据模型大更新",
+      "nodes": [
+        { "id": "A0", "type": "start", "name": "设计定稿", "description": "5 项设计全部拍板：地点用父地点树+局部坐标、老列只弃读、物品技能不做修订史", "state": "completed" },
+        { "id": "A1", "type": "process", "name": "建新表+既有表加列", "description": "新建 4 张表（物品/实体关系/关系类型/等级标准），角色/势力/地点/技能表加新列，迁移脚本实跑并跨进程复核落盘", "location": "backend/app/models/orm.py", "state": "completed" },
+        { "id": "A2", "type": "process", "name": "数据迁移+双写过渡", "description": "旧关系数据迁进新表；新增/修改/删除实体时新旧两套表同时写（防读侧还没切换丢数据）", "location": "backend/app/services/entity_relation_crud.py", "state": "completed" },
+        { "id": "A3", "type": "process", "name": "GraphRAG 注入协议", "description": "写章时提到某角色，自动按名字查出关系网/相关技能/物品/势力/地点，组装成上下文块；死亡角色只给名字+关系+已死亡", "location": "backend/app/services/graph_rag.py", "state": "completed", "doc": ".flow/docs/graph-rag-injection.md" },
+        { "id": "A4", "type": "process", "name": "AI 抽取链分级", "description": "AI 读章后自动认出物品/技能并落库（标 ai_generated，重名不覆盖）", "location": "backend/app/services/item_crud.py", "state": "completed" },
+        { "id": "A5", "type": "process", "name": "前端分批接入", "description": "分 4 批做前端：①角色库新字段✅ ③物品/技能页已挂路由（09-21，验收待确认）；剩 ②势力/地点新字段表单 ④关系网图谱。GraphRAG 已接入上下文构建器（开关 retrieval.graph_rag）", "location": "frontend/src/views/ItemListView.vue 等", "state": "in_progress", "doc": ".flow/docs/stage-a-frontend.md" },
+        { "id": "A6", "type": "end", "name": "验收收口", "description": "端到端走一遍：建实体→抽取→检索注入→写作；确认老列可以不读了，文档合并收口", "state": "planned" },
+        { "id": "A7", "type": "judge", "name": "关系层数据落地", "description": "🔴 待拍板：当前作品的关系边表是 0 条（库里 20 条全是已删项目的孤儿），GraphRAG 的关系网/技能/物品等 5 个注入块恒为空。要先定『AI 抽到的实体怎么自动连边』的口径（item_crud 还缺 upsert_edge）", "state": "pending_decision", "doc": ".flow/docs/relation-layer-decision.md" },
+        { "id": "DB1", "type": "database", "name": "实体与关系新表", "description": "SQLite 里的 4 张新表 + 老表新列", "state": "completed" },
+        { "id": "T1", "type": "table", "name": "entity_relations", "description": "实体关系边表：谁和谁是什么关系、权重多少。⚠️ 当前唯一项目 0 条（A7 的病根）", "state": "completed", "dbNodeId": "DB1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "project_id", "type": "varchar(36)", "desc": "属于哪个项目" },
+          { "name": "a_id / a_type", "type": "varchar(36)+varchar(16)", "desc": "A 端实体（角色/技能/物品/势力/地点）" },
+          { "name": "b_id / b_type", "type": "varchar(36)+varchar(16)", "desc": "B 端实体" },
+          { "name": "relation_type", "type": "varchar(24)", "desc": "关系名，取自 relation_types 字典（师徒/敌对…）" },
+          { "name": "meta", "type": "json", "desc": "附加信息：熟练度/数量/持有/起始章节" },
+          { "name": "note", "type": "text", "desc": "文字备注" },
+          { "name": "created_at", "type": "datetime", "desc": "建边时间" }
+        ] },
+        { "id": "T2", "type": "table", "name": "items", "description": "物品表：AI 抽到的新物品自动落库", "state": "completed", "dbNodeId": "DB1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "project_id", "type": "varchar(36)", "desc": "属于哪个项目" },
+          { "name": "name", "type": "varchar(80)", "desc": "物品名" },
+          { "name": "category", "type": "varchar(20)", "desc": "类别：丹药/武器/防具/材料/信物/功法" },
+          { "name": "summary", "type": "text", "desc": "一句话简介，检索时优先读" },
+          { "name": "full_desc", "type": "text", "desc": "效果/副作用/来历/品阶/限制" },
+          { "name": "is_unique", "type": "bool", "desc": "0 可多份 / 1 专属唯一" },
+          { "name": "ai_generated", "type": "bool", "desc": "1 = AI 抽取生成，作者可改可清" },
+          { "name": "tags / status", "type": "json+varchar", "desc": "标签；状态（完好/损毁/遗失/已消耗）" },
+          { "name": "created_at / updated_at", "type": "datetime", "desc": "时间" }
+        ] },
+        { "id": "T3", "type": "table", "name": "relation_types", "description": "关系类型字典（师徒/道侣/敌对…），迁移进来 20 条", "state": "completed", "dbNodeId": "DB1", "fields": [
+          { "name": "name", "type": "varchar(24)", "desc": "关系名（主键，如 师徒）" },
+          { "name": "symmetric", "type": "bool", "desc": "是否对称关系（对称只存一条边）" },
+          { "name": "inverse", "type": "varchar(24)", "desc": "逆关系名（如 师徒 的逆是 徒弟）" },
+          { "name": "weight", "type": "int", "desc": "注入排序权重，越大越先带出" },
+          { "name": "applies_to", "type": "json", "desc": "适用的实体对类型" },
+          { "name": "note", "type": "text", "desc": "备注" }
+        ] },
+        { "id": "T4", "type": "table", "name": "lv_standards", "description": "等级标准字典，迁移进来 20 条", "state": "completed", "dbNodeId": "DB1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "project_id", "type": "varchar(36)", "desc": "属于哪个项目" },
+          { "name": "kind", "type": "varchar(16)", "desc": "类型（force=势力，未来可扩角色）" },
+          { "name": "lv", "type": "int", "desc": "等级数字" },
+          { "name": "title", "type": "varchar(40)", "desc": "档位名，如「一方豪强」" },
+          { "name": "desc", "type": "text", "desc": "判据，如「势力最强者为筑基高手」" }
+        ] }
+      ],
+      "edges": [
+        { "from": "A0", "to": "A1", "text": "定稿后建表" },
+        { "from": "A1", "to": "A2", "text": "表好了迁数据" },
+        { "from": "A2", "to": "A3", "text": "数据就绪做注入" },
+        { "from": "A3", "to": "A4", "text": "注入协议定了改抽取" },
+        { "from": "A4", "to": "A5", "text": "后端好了接前端" },
+        { "from": "A5", "to": "A6", "text": "4批全完收口" },
+        { "from": "A7", "to": "A3", "text": "关系边为空→5个注入块恒空" },
+        { "from": "A1", "to": "DB1", "text": "建表加列" }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "阶段F·原子骨架管线",
+      "nodes": [
+        { "id": "F1", "type": "start", "name": "归并判据定案", "description": "跨书归并的相似度阈值和规则定稿（含动态 min 0.65/0.7/0.85），17 个单测锁死", "state": "completed" },
+        { "id": "F2", "type": "process", "name": "七书切原子+跨书归并", "description": "七本书切出 591 条单弧，按剧情结构相似归并成 75 组骨架", "location": "scripts/cut_atoms_from_chapters.py、merge_arcs_crossbook.py", "state": "completed" },
+        { "id": "F3", "type": "process", "name": "骨架入库+旧模板归档", "description": "75 条骨架进模板库（前端可见），旧 164 条草稿归档留底；三路向量索引已回填完毕", "state": "completed" },
+        { "id": "F4", "type": "process", "name": "组装演示：逐环给N路走法", "description": "取一条骨架，每个环节给出多种走法（重点形态），素材已够待开工", "state": "planned" },
+        { "id": "F5", "type": "process", "name": "核心飘标根治", "description": "切原子时 AI 标的『核心事件』87%不在弧内，要在提示词加约束+后置校验", "state": "planned" },
+        { "id": "F6", "type": "process", "name": "全量放量", "description": "逆天邪神续跑（446/2000）+ 八书归并。等硅基服务恢复（现已切统一网关）", "state": "planned" },
+        { "id": "F7", "type": "process", "name": "各书后半段扩章", "description": "遮天/九星/太荒后续段扩章，按用户选题材优先级排", "state": "to_plan" },
+        { "id": "F8", "type": "judge", "name": "骨架角色槽位补全", "description": "🔴 待拍板：75 条骨架的 361 个角色槽位全缺『位阶/性格』两字段，导致建卡时『功能位参考』返回空、人设自动起草失效。要改 prompt 后重跑 75 条", "location": "scripts/label_skeleton_casts.py", "state": "pending_decision", "doc": ".flow/docs/skeleton-cast-ranks-traits.md" },
+        { "id": "F9", "type": "judge", "name": "无口述时模板检索兜底", "description": "🔴 待拍板：作者不写『剧情口述』时模板检索 0 命中，75 条模板对这类作者完全不可见。要用篇名/卷概要当查询兜底", "state": "pending_decision", "doc": ".flow/docs/plan-template-fallback.md" }
+      ],
+      "edges": [
+        { "from": "F1", "to": "F2", "text": "规则定了开切" },
+        { "from": "F2", "to": "F3", "text": "归并完入库" },
+        { "from": "F3", "to": "F4", "text": "素材就绪做演示" },
+        { "from": "F3", "to": "F8", "text": "入库时发现的缺陷" },
+        { "from": "F3", "to": "F9", "text": "入库时发现的缺陷" },
+        { "from": "F5", "to": "F6", "text": "修好飘标再放量" }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "阶段E·全局条目库/尺度库",
+      "nodes": [
+        { "id": "E1", "type": "judge", "name": "类别与通用词口径定稿", "description": "✅ 2026-09-25 拍板 G1~G7（『≥2 本即收』+ 人工复核）：全 21 书扫描 50 词，8 个初筛不达标词经人工复核全部恢复，终态 46 active", "state": "completed" },
+        { "id": "E2", "type": "process", "name": "建 4 张小表+灌库", "description": "条目库/尺度库 4 张表建成 + global_ref_crud（幂等/别名归一/硬过滤/统计），单测 8/8；种子灌库 46 词条 + 6 尺度（说明全自写 ≤50 字，规避抄袭）", "location": "backend/app/services/global_ref_crud.py", "state": "completed", "doc": ".flow/docs/global-ref-store.md" },
+        { "id": "E3", "type": "process", "name": "抽取归一化接入", "description": "AI 抽到洗髓丹/灵石这类通用词时指向条目库，不在每本书里重复建条目", "state": "to_plan" },
+        { "id": "E4", "type": "process", "name": "写作时注入", "description": "写章/造物品/造技能时注入尺度+通用词候选，要求优先用通用词", "state": "to_plan" },
+        { "id": "E5", "type": "process", "name": "前端管理页", "description": "物品技能库页（GlobalRefView）已建并挂路由 global-ref（09-26）；侧栏入口与页面验收待确认", "location": "frontend/src/views/GlobalRefView.vue", "state": "in_progress" },
+        { "id": "GE1", "type": "database", "name": "全局条目库/尺度库", "description": "SQLite 里独立的 4 张小表，全库共用不按项目隔离：装跨书通用的惯例词和类别级造物尺度。种子 46 词条 + 6 尺度", "state": "completed" },
+        { "id": "GT1", "type": "table", "name": "global_items", "description": "条目库·物品：跨书通用惯例词（洗髓丹/灵石/乾坤袋…），AI 造物优先用它，抽取可归一到这", "state": "completed", "dbNodeId": "GE1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "name", "type": "varchar(60)", "desc": "惯例词主名（如 洗髓丹/灵石）" },
+          { "name": "category", "type": "varchar(20)", "desc": "类别：丹药/武器/防具/法器法宝/材料/灵石货币/符箓/信物/境界" },
+          { "name": "genre", "type": "varchar(10)", "desc": "题材：仙侠/历史/高武/通用" },
+          { "name": "brief", "type": "varchar(60)", "desc": "一句话通用说明（≤50 字自写不抄）" },
+          { "name": "full_desc", "type": "text", "desc": "详细描述（60~120 字，管理页展示用）" },
+          { "name": "aliases", "type": "json", "desc": "变体名归一，如 [乾坤袋, 须弥戒]" },
+          { "name": "public_domain", "type": "bool", "desc": "公有领域专名（轩辕剑类）" },
+          { "name": "reference_only", "type": "bool", "desc": "1 = 只作参考，禁止注入" },
+          { "name": "status", "type": "varchar(16)", "desc": "active/disabled（终态 46 条 active）" }
+        ] },
+        { "id": "GT2", "type": "table", "name": "global_skills", "description": "条目库·技能：御剑术/遁术/生活职业这类跨书通用词（功法名几乎全是各书独创，条目预期少）", "state": "completed", "dbNodeId": "GE1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "name", "type": "varchar(60)", "desc": "惯例词主名" },
+          { "name": "category", "type": "varchar(20)", "desc": "类别：攻击技/身法遁术/幻术/阵法/生活职业/功法" },
+          { "name": "genre", "type": "varchar(10)", "desc": "题材（同物品）" },
+          { "name": "brief / full_desc", "type": "varchar+text", "desc": "一句话说明 + 详细描述（同物品条目）" },
+          { "name": "aliases", "type": "json", "desc": "变体名归一" },
+          { "name": "public_domain / reference_only", "type": "bool", "desc": "公有领域专名；只作参考禁止注入" },
+          { "name": "status", "type": "varchar(16)", "desc": "active/disabled" }
+        ] },
+        { "id": "GT3", "type": "table", "name": "global_item_scales", "description": "尺度库·物品：类别级设计尺度，教 AI 造新的不千篇一律。只存结构不存成品描述（硬纪律）", "state": "completed", "dbNodeId": "GE1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "category", "type": "varchar(20)", "desc": "类别（与条目库同词表）" },
+          { "name": "genre", "type": "varchar(10)", "desc": "题材" },
+          { "name": "function_pos", "type": "varchar(120)", "desc": "功能位：突破/疗伤/储物/飞行…" },
+          { "name": "grade_axis", "type": "varchar(200)", "desc": "品阶轴：凡兵→法器→灵器→法宝" },
+          { "name": "intensity_scale", "type": "varchar(200)", "desc": "强度尺度" },
+          { "name": "cost_scale", "type": "varchar(200)", "desc": "代价尺度" },
+          { "name": "rarity", "type": "varchar(10)", "desc": "叙事位置：常见/稀有/传说" },
+          { "name": "notes", "type": "text", "desc": "体系设计说明（如灵石兑换比）" }
+        ] },
+        { "id": "GT4", "type": "table", "name": "global_skill_scales", "description": "尺度库·技能：与物品尺度库同构", "state": "completed", "dbNodeId": "GE1", "fields": [
+          { "name": "id", "type": "varchar(36)", "desc": "主键" },
+          { "name": "category", "type": "varchar(20)", "desc": "类别（与技能条目库同词表）" },
+          { "name": "genre", "type": "varchar(10)", "desc": "题材" },
+          { "name": "function_pos", "type": "varchar(120)", "desc": "功能位：攻击/防御/位移/探查…" },
+          { "name": "grade_axis / intensity_scale / cost_scale", "type": "varchar(200)", "desc": "品阶轴 / 强度尺度 / 代价尺度" },
+          { "name": "rarity", "type": "varchar(10)", "desc": "叙事位置：常见/稀有/传说" },
+          { "name": "notes", "type": "text", "desc": "体系设计说明" }
+        ] }
+      ],
+      "edges": [
+        { "from": "E1", "to": "E2", "text": "口径定稿建表" },
+        { "from": "E2", "to": "E3", "text": "表好了接抽取" },
+        { "from": "E3", "to": "E4", "text": "归一化通了做注入" },
+        { "from": "E2", "to": "E5", "text": "表好了做前端" },
+        { "from": "E2", "to": "GE1", "text": "建表+灌库" },
+        { "from": "GE1", "to": "E3", "text": "归一时查惯例词" },
+        { "from": "GE1", "to": "E4", "text": "注入尺度+候选" }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "阶段B/C/D·其他规划",
+      "nodes": [
+        { "id": "B1", "type": "process", "name": "太荒模板扩容收尾", "description": "把太荒的弧补切完、蒸馏单弧、出画像、重排索引", "state": "planned" },
+        { "id": "B2", "type": "process", "name": "观察放开截断后的模板质量", "description": "凝练描述字数上限放开后，抽几个新模板和旧模板人工比信息量", "state": "planned" },
+        { "id": "B3", "type": "process", "name": "九星继续扩容", "description": "九星 601~1200 章继续切，按用户选题材优先级", "state": "to_plan" },
+        { "id": "C1", "type": "process", "name": "S3 修订表同步", "description": "角色修订历史表的字段跟上阶段A的新列，否则改字段记不到历史", "state": "planned" },
+        { "id": "C2", "type": "process", "name": "语气词密度观察", "description": "攒够 10 章同版本样本再定均值（现 7 章，0.29/千字 vs 真人 3.23）", "state": "to_plan" },
+        { "id": "C3", "type": "process", "name": "工具调用 POC", "description": "function calling 小规模试点：1 个工具×20 次", "state": "to_plan" },
+        { "id": "C4", "type": "process", "name": "分页/回收站", "description": "列表超过 500 行才做分页；回收站要全库软删除改造，判据触发才做", "state": "to_plan" },
+        { "id": "D1", "type": "judge", "name": "02文档重写拍板", "description": "已实现清单要不要重写成按模块的能力清单，等用户拍板", "state": "pending_decision" },
+        { "id": "D2", "type": "process", "name": "05架构文档同步", "description": "架构与接口文档跟上阶段A的表结构/路由变更，收口时一并做", "state": "planned" },
+        { "id": "D3", "type": "process", "name": "06手册索引同步", "description": "AI 工作手册的文档索引跟着文档增删更新（持续性任务）", "state": "planned" },
+        { "id": "G1", "type": "process", "name": "设定模板库改造", "description": "设定库从『单条设定』改为『按题材一套一套』（Markdown 单文档：境界/货币/体系/规则/物价），新建小说按题材挑选；09-26 开工，代码未提交、验证证据待补", "location": "backend/app/services/setting_template_crud.py", "state": "in_progress" }
+      ],
+      "edges": [
+        { "from": "B1", "to": "B2", "text": "扩容完看质量" }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "核心写作闭环",
+      "nodes": [
+        { "id": "W0", "type": "start", "name": "作者打开写作台", "description": "选作品→选篇→选章", "state": "completed" },
+        { "id": "W1", "type": "process", "name": "剧情商讨", "description": "和 AI 反复推演剧情；AI 先说要哪些资料/设定，加载后再答（两阶段按需加载）", "state": "completed" },
+        { "id": "W2", "type": "process", "name": "章节流式生成", "description": "SSE 实时输出、可随时中断；篇规划批量/单章对话框/对话框内三个入口共用同一生成端点", "state": "completed", "doc": ".flow/docs/chapter-stream-generation.md" },
+        { "id": "W3", "type": "process", "name": "安全网三件套", "description": "复读检测防鬼打墙、去AI味扫描、内联设定校验（真会报 issue，不是假绿灯）", "state": "completed", "doc": ".flow/docs/safety-net.md" },
+        { "id": "W4", "type": "process", "name": "形态示范语料", "description": "教 AI 怎么分段/写对话的示范段已换成当代校园/都市口语（原古装语料把文风带偏，隔离实验证实引号形态 100% 跟随示范）", "location": "backend/app/core/context/builder.py", "state": "completed" },
+        { "id": "W5", "type": "process", "name": "章节落库+版本留档", "description": "正文落库并自动存一个版本（配置快照+指标），作者改正文自动记反馈样本", "state": "completed" },
+        { "id": "W6", "type": "process", "name": "写后自动沉淀", "description": "每章写完自动抽取：章级记忆/篇章摘要/伏笔动作，60秒内落库（走向卡片已按作者拍板默认下线，代码保留可恢复）", "location": "backend/app/services/ingestion.py", "state": "completed", "doc": ".flow/docs/post-write-ingestion.md" },
+        { "id": "W7", "type": "process", "name": "伏笔全生命周期", "description": "埋设→提示→回收（或标烂尾），自动回注到后续章节的上下文", "location": "backend/app/services/foreshadow_crud.py", "state": "completed" },
+        { "id": "W8", "type": "process", "name": "上下文装配", "description": "下一章写之前自动组装：前情记忆+全局设定+伏笔状态+Hybrid混合检索+实体关系图，按预算裁剪", "location": "backend/app/core/context/builder.py", "state": "completed", "doc": ".flow/docs/context-builder.md" },
+        { "id": "W9", "type": "process", "name": "段落写法打磨", "description": "作者勾选若干段打包成一次请求，AI 按块库参考逐段重写；缺号/编号错段保留原文不静默覆盖。09-21 方案拍板，验证证据待补", "location": "backend/app/services/para_polish.py", "state": "in_progress", "doc": ".flow/docs/para-polish.md" }
+      ],
+      "edges": [
+        { "from": "W0", "to": "W1", "text": "先聊剧情" },
+        { "from": "W1", "to": "W2", "text": "定了开写" },
+        { "from": "W2", "to": "W3", "text": "边写边把关" },
+        { "from": "W3", "to": "W5", "text": "过检落库" },
+        { "from": "W5", "to": "W6", "text": "写完自动沉淀" },
+        { "from": "W5", "to": "W9", "text": "写后选段打磨" },
+        { "from": "W6", "to": "W7", "text": "抽出伏笔动作" },
+        { "from": "W7", "to": "W8", "text": "伏笔回注" },
+        { "from": "W8", "to": "W2", "text": "下一章带上前情" }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "篇规划与批量生成",
+      "nodes": [
+        { "id": "P0", "type": "start", "name": "打开篇规划页", "description": "侧栏选『篇规划』→ 选小说/篇", "state": "completed" },
+        { "id": "P1", "type": "process", "name": "篇规划生成链路", "description": "按口述+模板骨架生成整章计划，防幻觉剔除不存在的角色，拍板后任务卡 P_CRITICAL 永不裁剪；模板注入已瘦身 -53.7%", "location": "backend/app/services/plan_crud.py", "state": "completed", "doc": ".flow/docs/plan-generation.md" },
+        { "id": "P2", "type": "process", "name": "角色向量选角", "description": "计划每个槽位用向量库选角：状态门四态（死人默认不进池）+ 阈值 0.58 真机标定 + 手改不被重算覆盖", "location": "backend/app/services/casting_crud.py", "state": "completed", "doc": ".flow/docs/vector-casting.md" },
+        { "id": "P3", "type": "process", "name": "角色连续性 B 档", "description": "新角色引入单（每篇≤3、作者确认才建卡）+ 篇间交接差集警告 + 回归理由材料包（伏笔未回收优先三级兜底）", "location": "backend/app/services/plan_crud.py", "state": "completed", "doc": ".flow/docs/character-continuity.md" },
+        { "id": "P4", "type": "process", "name": "篇规划前端页", "description": "计划表格行内编辑/行级AI改行/拍板锁定 + 选角面板（0.58阈值线）+ 引入单面板 + 连续性警告区。vite build 通过，真机交互待用户确认", "location": "frontend/src/views/PlanView.vue", "state": "completed", "doc": ".flow/docs/plan-view-frontend.md" },
+        { "id": "P5", "type": "process", "name": "篇级批量生成面板", "description": "拍板后一键生成本篇：逐章循环调单章 SSE，断点续跑、暂停/终止/单行重试；已修三防（并发重入/幽灵章/中断误判）；每章完成往对话线程留正文全文留痕", "location": "frontend/src/views/PlanView.vue", "state": "completed", "doc": ".flow/docs/batch-generation.md" }
+      ],
+      "edges": [
+        { "from": "P0", "to": "P1", "text": "选篇生成计划" },
+        { "from": "P1", "to": "P2", "text": "计划槽位去选角" },
+        { "from": "P1", "to": "P3", "text": "生成时查连续性" },
+        { "from": "P2", "to": "P4", "text": "选角结果进面板" },
+        { "from": "P3", "to": "P4", "text": "连续性进面板" },
+        { "from": "P4", "to": "P5", "text": "拍板后一键生成" }
+      ]
+    }
+  ]
+}
