@@ -39,6 +39,8 @@ KEY_PUSH_DIRECTIONS = "memory.push_directions_to_chat"
 KEY_STAGE_EVERY = "memory.stage_compress_every"
 # 注入下一章的最近章级记忆条数
 KEY_RECENT_MEMORY_N = "memory.recent_chapters"
+# 章节生成时是否注入全局条目库候选词 + 造物尺度（E4；回滚 = 置 False）
+KEY_GLOBALREF_INJECT = "globalref.inject_on_generate"
 
 DEFAULTS: dict[str, Any] = {
     KEY_CONTEXT_BUDGET: "standard",
@@ -48,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
     KEY_INGEST_ENABLED: True,
     KEY_EXTRACT_ENABLED: True,
     KEY_AGGREGATE_OVERVIEW: True,
+    KEY_GLOBALREF_INJECT: True,
     # ⬇ 2026-09-13 用户拍板下线：走向卡片不再每章自动推到对话区。
     #   代码全保留（抽取 prompt 的 next_directions 字段、_render_directions、推送块均未动），
     #   恢复方式：把此处改回 True，或在设置页 / DB app_configs 落一行
@@ -68,6 +71,7 @@ DESCRIPTIONS: dict[str, str] = {
     KEY_PUSH_DIRECTIONS: "把章后走向建议以卡片形式推送到对话区（2026-09-13 起默认下线，需手动开启）",
     KEY_STAGE_EVERY: "每累积多少章滚动压缩一次阶段摘要",
     KEY_RECENT_MEMORY_N: "注入下一章的最近章级记忆条数",
+    KEY_GLOBALREF_INJECT: "章节生成时注入全局条目库候选词与造物尺度（E4，命中惯例词防硬造）",
 }
 
 

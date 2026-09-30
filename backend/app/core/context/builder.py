@@ -16,7 +16,8 @@ from app.core.context.budget import (
     P_CRITICAL, P_SKILL, P_REFERENCE,
 )
 from app.core.context import layers
-from app.services import app_config, humanizer, reference_crud, skill_dispatch
+from app.models.orm import ProjectORM
+from app.services import app_config, global_ref_crud, humanizer, reference_crud, skill_dispatch
 
 # 章节生成的底线系统提示词。SKILL 与去 AI 味块会追加在后面。
 BASE_SYSTEM = (
@@ -580,6 +581,20 @@ def build_chapter_messages(
     skill_block = skill_dispatch.build_block(db, "chapter")
     if skill_block:
         sys_parts.append(skill_block)
+
+    # ---------- 5.5 E4 全局条目库注入（docs/03 阶段E）----------
+    # 通用词候选 + 造物尺度进 system：AI 取名/造物优先用惯例词，防"伐骨丹"式硬造。
+    # 回滚开关 app_configs globalref.inject_on_generate（默认开，置 False 即关）。
+    # 条目库为空/查询异常一律跳过，不阻断生成。
+    if app_config.get(db, app_config.KEY_GLOBALREF_INJECT, True):
+        try:
+            _proj = db.query(ProjectORM).filter_by(id=project_id).first()
+            _ref_block = global_ref_crud.build_injection_block(
+                db, genre=getattr(_proj, "genre", None))
+            if _ref_block:
+                sys_parts.append(_ref_block)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[builder] 全局条目库注入跳过: {type(e).__name__}: {str(e)[:80]}")
 
     if app_config.get(db, app_config.KEY_HUMANIZE_INJECT, True):
         # 2026-09-13 拍板：normal 档的禁令+写法准则与「去AI味·网文正文」SKILL 内容大量重复，

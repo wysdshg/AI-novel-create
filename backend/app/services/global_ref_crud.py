@@ -233,6 +233,69 @@ def inject_scales(db: Session, *, kind: str, category: str | None = None,
     return q.all()
 
 
+# ---------------------------------------------------------------------------
+# E4 写作注入（docs/03 阶段E：尺度 + 通用词候选，builder.py 拼 system 时调用）
+# ---------------------------------------------------------------------------
+# 项目 genre 取值来自前端新建对话框（玄幻/都市/悬疑/历史/科幻/言情/武侠/其他），
+# 条目库 genre 池是（仙侠/历史/高武/通用）——两套词表不一致，这里做家族映射：
+# 修真家族（玄幻/仙侠/武侠）→ 仙侠池；历史 → 历史池；其余题材只吃通用池。
+# inject_* 本就会把「通用」并入（genre.in_([genre, "通用"])），此处只补家族归属。
+_GENRE_FAMILY = {"玄幻": "仙侠", "仙侠": "仙侠", "武侠": "仙侠", "高武": "高武", "历史": "历史"}
+
+
+def _resolve_pool_genre(genre: str | None) -> str:
+    return _GENRE_FAMILY.get((genre or "").strip(), "通用")
+
+
+def _scale_line(r) -> str:
+    parts = [f"功能位={r.function_pos}"]
+    if (r.grade_axis or "").strip():
+        parts.append(f"品阶={r.grade_axis}")
+    if (r.intensity_scale or "").strip():
+        parts.append(f"强度={r.intensity_scale}")
+    if (r.cost_scale or "").strip():
+        parts.append(f"代价={r.cost_scale}")
+    head = f"{r.category}（{r.rarity}）"
+    return f"  {head}：{'；'.join(parts)}"
+
+
+def build_injection_block(db: Session, *, genre: str | None,
+                          per_category: int = 8) -> str | None:
+    """E4 写作注入块：通用词候选（按类别只给名字）+ 类别尺度 + 使用要求。
+
+    - 只走 inject_*（硬纪律②继承：reference_only / disabled 天然不可见）；
+    - 候选只给名字不重复 brief（块要进 system，控体积；口径以条目库为准）；
+    - 条目全空返回 None，调用方不拼空块；
+    - 题材家族映射见 _GENRE_FAMILY（玄幻项目吃仙侠池，都市等只吃通用池）。
+    """
+    pool = _resolve_pool_genre(genre)
+    by_cat: dict[str, list[str]] = {}
+    for cat in sorted(_ITEM_CATEGORIES):
+        rows = inject_items(db, category=cat, genre=pool, limit=per_category)
+        if rows:
+            by_cat[f"物品·{cat}"] = [r.name for r in rows]
+    for cat in sorted(_SKILL_CATEGORIES):
+        rows = inject_skills(db, category=cat, genre=pool, limit=per_category)
+        if rows:
+            by_cat[f"技能·{cat}"] = [r.name for r in rows]
+    scales = inject_scales(db, kind="item", genre=pool) + inject_scales(db, kind="skill", genre=pool)
+    if not by_cat and not scales:
+        return None
+    lines = ["【物品/技能·通用词参考——有候选就别硬造】"]
+    if by_cat:
+        lines.append("■ 写到的物品/技能若在下面名单里，**直接用这个名字**，别另起名：")
+        for key in sorted(by_cat):
+            lines.append(f"  {key}：" + "、".join(by_cat[key]))
+    if scales:
+        lines.append("■ 确需造新东西时，按这类别的尺度来（避免千篇一律）：")
+        lines.extend(_scale_line(r) for r in scales)
+    lines.append(
+        "■ 要求：①候选名单里的通用词优先使用；②独创时名字要像这个类别"
+        "（丹药以「丹」收尾、剑术含「剑」），能力按上面尺度设计；"
+        "③本块是取名/造物的参考，不必在正文里提及或罗列，按剧情自然取用。")
+    return "\n".join(lines)
+
+
 def stats(db: Session) -> dict:
     """库容概览（管理页/报告用）。"""
     return {

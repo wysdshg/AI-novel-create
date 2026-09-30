@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-09-30T15:18:18.691Z",
+  "updatedAt": "2026-09-30T15:25:20.028Z",
   "modules": {
     "0": {
       "id": "0",
@@ -868,11 +868,11 @@
           "id": "E4",
           "type": "process",
           "name": "写作时注入",
-          "description": "写章/造物品/造技能时注入尺度+通用词候选，要求优先用通用词",
+          "description": "✅ 2026-09-30：global_ref_crud 新增 build_injection_block（通用词候选按类别只给名字 + 类别尺度 + 使用要求；题材家族映射 玄幻/武侠→仙侠池，其余只吃通用池），builder.py 拼 system 时接入（回滚开关 app_configs globalref.inject_on_generate 默认开）。块级单测 3 例（硬过滤继承/家族隔离/空库 None），全量 547 passed；真库真项目验证注入块可达（system 内实测命中）",
           "location": "",
-          "state": "to_plan",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-09-30T15:25:20.027Z"
         },
         "E5": {
           "id": "E5",

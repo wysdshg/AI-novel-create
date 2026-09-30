@@ -78,3 +78,49 @@ def test_stats(test_db):
     gr.add_item(test_db, name="灵石", category="灵石货币", brief="通货", genre="仙侠")
     st = gr.stats(test_db)
     assert st["items"] == 1 and st["skills"] == 0
+
+
+# ------------------------- E4 · 写作注入块（docs/03 阶段E） -------------------------
+
+def test_build_injection_block_groups_and_hard_filters(test_db):
+    """候选按类别给名字；reference_only / disabled 沿硬纪律②天然不可见；尺度随池注入。"""
+    gr.add_item(test_db, name="洗髓丹", category="丹药", brief="改造根骨", genre="仙侠")
+    gr.add_item(test_db, name="灵石", category="灵石货币", brief="通货", genre="通用")
+    gr.add_item(test_db, name="青云诀物证", category="法器法宝", brief="研究用",
+                genre="仙侠", reference_only=True)
+    gr.add_item(test_db, name="下架丹", category="丹药", brief="已下线", genre="仙侠")
+    test_db.query(gr.GlobalItemORM).filter_by(name="下架丹").update({"status": "disabled"})
+    gr.add_skill(test_db, name="御剑术", category="攻击技", brief="驭使飞剑", genre="仙侠")
+    gr.add_item_scale(test_db, category="丹药", function_pos="破境/疗伤/洗髓",
+                      genre="仙侠", grade_axis="凡丹→灵丹→宝丹")
+    test_db.commit()
+    blk = gr.build_injection_block(test_db, genre="玄幻")   # 玄幻 → 仙侠池
+    assert blk and "【物品/技能·通用词参考" in blk
+    assert "物品·丹药：洗髓丹" in blk and "物品·灵石货币：灵石" in blk
+    assert "技能·攻击技：御剑术" in blk
+    assert "青云诀物证" not in blk and "下架丹" not in blk      # 硬纪律②
+    assert "丹药（常见）：功能位=破境/疗伤/洗髓；品阶=凡丹→灵丹→宝丹" in blk
+    assert "优先使用" in blk
+
+
+def test_build_injection_block_genre_family_isolation(test_db):
+    """玄幻/武侠吃仙侠池；历史只吃历史池；都市/未知只吃通用池。"""
+    gr.add_item(test_db, name="飞剑", category="武器", brief="仙侠飞剑", genre="仙侠")
+    gr.add_item(test_db, name="火铳", category="武器", brief="历史火器", genre="历史")
+    gr.add_item(test_db, name="铁剑", category="武器", brief="凡兵", genre="通用")
+    test_db.commit()
+    blk_rx = gr.build_injection_block(test_db, genre="玄幻")
+    assert "飞剑" in blk_rx and "火铳" not in blk_rx and "铁剑" in blk_rx
+    blk_wx = gr.build_injection_block(test_db, genre="武侠")
+    assert "飞剑" in blk_wx                                    # 武侠同属修真家族
+    blk_ls = gr.build_injection_block(test_db, genre="历史")
+    assert "火铳" in blk_ls and "飞剑" not in blk_ls
+    blk_ds = gr.build_injection_block(test_db, genre="都市")
+    assert "铁剑" in blk_ds and "飞剑" not in blk_ds and "火铳" not in blk_ds
+    blk_none = gr.build_injection_block(test_db, genre=None)   # 未设题材 → 只吃通用池
+    assert "铁剑" in blk_none and "飞剑" not in blk_none
+
+
+def test_build_injection_block_empty_library_returns_none(test_db):
+    """空库返回 None，调用方不拼空块。"""
+    assert gr.build_injection_block(test_db, genre="玄幻") is None
