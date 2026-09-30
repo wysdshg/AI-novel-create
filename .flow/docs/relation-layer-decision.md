@@ -1,33 +1,39 @@
-# 关系层数据落地（A7·待拍板）
+# 关系层数据落地（A7·已落地）
 
-> 状态: pending_decision | 建立: 2026-09-30 | 更新: 2026-09-30 | 上次验证: —（2026-09-20 八问核查实测确认，等用户拍板口径）
+> 状态: completed | 建立: 2026-09-30 | 更新: 2026-10-01 | 验证: 2026-10-01 端到端真跑通过
 
 ## 为什么做（问题是什么）
 
-GraphRAG 代码链路正常，但**当前作品 entity_relations = 0 条**（库里 20 条全是已删项目的孤儿）→ 【关系网】【相关技能】【相关物品】【相关势力】【相关地点】5 个注入块**恒为空**，实测注入仅 641 字符。
+GraphRAG 代码链路正常，但【关系网】【相关技能】【相关物品】【相关势力】【相关地点】5 个注入块因边表无归属边而恒空（角色-角色关系边已随旧表迁移落库，缺的是 skill/item 归属边——AI 抽的实体全部 owner_id=None）。
 
-## 争议点/要拍板什么
+## 拍板口径（2026-10-01 用户拍板）
 
-「AI 抽取到的实体怎么自动连边」——归属/owner 从哪来。三个叠加原因：
+「每章写完 AI 抽实体时**顺带判定关系连边**」——不是机械同章共现，AI 直接判定"谁持有/谁掌握"。
 
-1. 旧表 relations=0，无可迁移源
-2. AI 抽取的 skill owner_id=None、items 无归属 → 成不了边
-3. item_crud 只有 remove_edges_of、**缺 upsert_edge**（新物品只清边不建边）
+## 落地实现（2026-10-01）
 
-## 候选方案
+1. 抽取 prompt：`new_entities` 的 item/skill 加 `owner` 字段（须出自 characters，无主就空）
+2. `normalize_extract` 保留 owner 字段（此前会被洗掉）
+3. `entity_relation_crud.link_owner_from_extract`：双防线连边（① owner 须在本章 characters 名单；② 名字须精确解析到库内角色），新建与重名两分支都连（重摄取可为存量孤儿补边），幂等由 upsert_edge 保证
+4. `item_crud/skill_crud.sync_from_extract` 接入（边类型：持有物品/掌握技能），stats 加 `linked` 计数
+5. `ingestion` 2.7 节调用点传 `chapter_characters` + `chapter_no`
 
-- 方案甲：抽取时按"出现同章"自动建低权重边 + 人工确认升级
-- 方案乙：只靠双写链路（改关系/势力/技能时建边），抽取不建边
-- （取舍：自动边噪声 vs 全人工成本，等用户定）
+## 怎么验证（已验证 ✅）
 
-## 怎么验证
+- 单测 +4（连边成功/重名补边/双防线拒边/normalize 保留 owner），全量 **551 passed**
+- 端到端真跑：重摄取「原神启动」第 1 章 → `items linked=1` → GraphRAG【相关物品】块非空（灰石：陈峰从药渣中捡到的五块温热石头…）、关系网新增 `陈峰—[持有物品]→灰石`、注入 278→383 字符
 
-拍板后：跑一章生成 → 查 entity_relations 行数 > 0 → GraphRAG 5 块非空 → 上下文出现关系网内容。
+## 存量回填策略
+
+重摄取幂等自动补边（重名跳过分支也连边），随写作自然积累；无需专门跑批。
+库内 20 条已删项目孤儿边无害（assemble 按 project_id 过滤），暂不清理。
 
 ## 代码位置
 
-- backend/app/services/entity_relation_crud.py（upsert_edge 待补）、item_crud.py
+- backend/app/services/entity_relation_crud.py（link_owner_from_extract）
+- backend/app/services/item_crud.py / skill_crud.py（sync_from_extract 连边）
+- backend/app/services/ingestion.py（prompt + normalize + 调用点）
 
 ## 关联
 
-- 阻塞 A3（注入空转）、A5④（关系网图谱无数据）
+- A3（GraphRAG 读侧已通）、A5④（关系网图谱有数据了）、A6（端到端验收）

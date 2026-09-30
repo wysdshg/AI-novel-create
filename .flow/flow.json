@@ -305,11 +305,11 @@
           "id": "A7",
           "type": "judge",
           "name": "关系层数据落地",
-          "description": "🔴 待拍板：当前作品的关系边表是 0 条（库里 20 条全是已删项目的孤儿），GraphRAG 的关系网/技能/物品等 5 个注入块恒为空。要先定『AI 抽到的实体怎么自动连边』的口径（item_crud 还缺 upsert_edge）",
-          "location": "",
-          "state": "pending_decision",
+          "description": "✅ 2026-10-01 拍板+落地：AI 抽实体时顺带判定归属连边——抽取 prompt 加 owner（谁持有/谁掌握），item/skill 落库后连「持有物品/掌握技能」边（新建+重名两分支都连，重摄取可为存量孤儿补边），双防线防幻觉。端到端验证：重摄取第1章 → linked=1 → GraphRAG【相关物品】块非空、注入 278→383 字符。存量回填随重摄取幂等补齐",
+          "location": "backend/app/services/entity_relation_crud.py",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z",
+          "updatedAt": "2026-10-01T00:00:00.000Z",
           "doc": ".flow/docs/relation-layer-decision.md"
         },
         "DB1": {
@@ -658,11 +658,11 @@
           "id": "F8",
           "type": "judge",
           "name": "骨架角色槽位补全",
-          "description": "🔴 待拍板：75 条骨架的 361 个角色槽位全缺『位阶/性格』两字段，导致建卡时『功能位参考』返回空、人设自动起草失效。要改 prompt 后重跑 75 条",
+          "description": "⏸ 2026-10-01 转 to_plan：用户拟升级全新模板机制——现 cast 在「概括后再概括」的骨架文本上提取（原文→逐章摘要→弧归并→跨书凝练→提角色），天然提不出立体角色；新方向从小说原文提取但消耗巨大，方向未定（讨论未落盘待口述补记），冷静期 3 天后评估。备查小修：改 prompt+validate 补位阶/性格 → 重跑 75 条（约 75 次 LLM）→ 回填三路向量；若新机制立项则小修作废勿先花钱",
           "location": "scripts/label_skeleton_casts.py",
-          "state": "pending_decision",
+          "state": "to_plan",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z",
+          "updatedAt": "2026-10-01T00:00:00.000Z",
           "doc": ".flow/docs/skeleton-cast-ranks-traits.md"
         },
         "F9": {
