@@ -878,9 +878,9 @@
           "id": "E5",
           "type": "process",
           "name": "前端管理页",
-          "description": "物品技能库页（GlobalRefView）已建并挂路由 global-ref（09-26）；侧栏入口与页面验收待确认",
+          "description": "物品技能库页（GlobalRefView）挂路由 global-ref；入口=模板库页顶部「物品库/技能库」tab。✅ 2026-10-01 用户验收通过：tab 切换、列表加载、搜索过滤、详情编辑均正常（注意：侧栏「参考资料」是另一页面 /global-reference，与此无关）",
           "location": "frontend/src/views/GlobalRefView.vue",
-          "state": "in_progress",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
           "updatedAt": "2026-09-30T13:09:13.029Z"
         },
