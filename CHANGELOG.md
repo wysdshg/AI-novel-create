@@ -10,7 +10,7 @@
 - **A6 遗留清理 ✅：旧表 relations 退役，阶段A 双写包袱卸除**（551 单测全绿）。`relation_crud` 重写为直读 `entity_relations`（API 契约不变：subject/object↔a_id/b_id，strength↔meta.strength；update 改原对象改字段保 id 稳定）；`entity_graph` 一跳扩展改读新表角色对边；`config_command` 查重、`character_crud` 删角色级联同步切换；A2 双写停止，`RelationORM` 读写点清零（ORM 类与表数据保留，迁移能力留档）。测试适配：entity_graph/entity_sync/discussion_graph/cascade_delete/data_model_a2 共 5 文件。
 - **flow 图对账大扫除**：M2/M4 模块描述更新为全绿收口、M3 反映 F9+F8+冻结现状、T1 关系边表描述从"0 条病根"改为数据落地+唯一事实源；C2/C4/B3/F7 四个 to_plan 按拍板转 frozen（挂起待触发）。
 
-- **A6 ✅：阶段A 端到端验收收口，阶段A（数据模型大更新）全模块关闭**（flow 图 A6 → completed）。只读脚本实跑《原神是怎样练成的》：V1 新旧关系表对账 15=15；V2 双开关开启；V3 `build_chapter_messages` 实跑（hint 命中 5 角色）→ GraphRAG 注入块 699 字符（出场人物 5 人 + 关系网 15 边）确入最终 user 消息、无跳过警告；V4 `entity_graph` 一跳扩展 trace 健康。⚠️ 唯一遗留：`entity_graph` 仍读旧表 `relations` 且默认开启——停双写需后续迁该读点到新表（不影响功能正确性），已记入 flow 图与 docs/02。
+- **A6 ✅：阶段A 端到端验收收口，阶段A（数据模型大更新）全模块关闭**（flow 图 A6 → completed）。只读脚本实跑《原神是怎样练成的》：V1 新旧关系表对账 15=15；V2 双开关开启；V3 `build_chapter_messages` 实跑（hint 命中 5 角色）→ GraphRAG 注入块 699 字符（出场人物 5 人 + 关系网 15 边）确入最终 user 消息、无跳过警告；V4 `entity_graph` 一跳扩展 trace 健康。⚠️ 唯一遗留：`entity_graph` 仍读旧表 `relations` 且默认开启——停双写需后续迁该读点到新表（不影响功能正确性），已记入 flow 图与 docs/02。（→ **同日晚些已清理完毕，见本日首条"遗留清理"**）
 
 - **A5 ✅：阶段A 前端四批全部验收通过**（flow 图 A5 → completed，用户实拍 5 图核对）。①角色新字段表单（身份地位/当前等级/技能/关系网）②势力/地点新字段（势力范围/核心成员）③项目内物品/技能页（物品库 11 条 AI 抽取数据显示）④关系网图谱（`CharacterRelationView.vue` SVG 图谱：15 角色·15 关系边全渲染、节点按地位着色、连线带关系词、右侧详情面板带权重列表）。悬案结案：09-20 文档"仅完成 1/4"过时，②③④实际早已做完只是没验收。**阶段A 仅剩 A6 端到端验收收口**。
 - **G1 ✅：设定模板库用户确认完成**（flow 图 G1 → completed）。库内 3 套题材模板实存（玄幻九境界/架空历史宋代框架/都市高武武道九阶），页面可见在用，代码 c6b342a。图上"代码未提交"过时描述清掉。
