@@ -82,6 +82,24 @@ def update_template(template_id: str, body: TemplateUpsert,
     return ok(svc._to_dict(o))
 
 
+class TemplateReview(BaseModel):
+    """B16 最小版：模板审核（只改状态，不动结构）。状态值与前端既有约定一致。"""
+    status: str = Field(..., pattern="^(draft|reviewed|archived)$")
+
+
+@router.post("/{template_id}/review", summary="审核模板（通过 / 退回 / 弃用）")
+def review_template(template_id: str, body: TemplateReview,
+                    db: Session = Depends(get_session)):
+    """模板库的人工确认入口（B16 最小版，2026-09-17）：只改 `status`。
+
+    语义：`draft` 候选 / `reviewed` 已采用 / `deprecated` 弃用（不进检索结果）。
+    """
+    o = svc.update(db, template_id, {"status": body.status})
+    if o is None:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return ok(svc._to_dict(o))
+
+
 @router.delete("/{template_id}", summary="删除模板")
 def delete_template(template_id: str, db: Session = Depends(get_session)):
     if not svc.delete(db, template_id):

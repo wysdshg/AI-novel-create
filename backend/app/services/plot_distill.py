@@ -123,6 +123,158 @@ def _pick_cast_for_arc(arc: dict, book_cast: dict) -> list[dict]:
     return hit
 
 
+# ---- L2 性格 × 位阶（2026-09-16 立项，见 docs/08-C8 与 outputs/角色性格维度设计-草案.md）----
+# 12 条双极维度；刻度 -10~+10，提示词只准用 9 个锚点。
+TRAIT_DIMS: dict[str, str] = {
+    "altruism": "利他↔自私", "honor": "信义↔背信", "mercy": "仁慈↔狠辣",
+    "resolve": "坚毅↔易摧", "decisiveness": "果决↔犹豫", "discipline": "自律↔放纵",
+    "risk": "冒险↔稳健", "rationality": "理性↔冲动", "guile": "城府↔直率",
+    "idealism": "理想↔务实", "warmth": "热忱↔冷漠", "dominance": "强势↔随和",
+}
+TRAIT_ANCHORS = (0, 1, 4, 7, 10)      # 允许的**正向量级**（吸附与提示词都只给这些档）
+_ANCHORS_SIGNED = tuple(sorted({0} | {s * a for a in TRAIT_ANCHORS if a for s in (1, -1)}))
+TRAIT_INFER_MAX = 4                    # **推断值**的幅度上限（±7/±10 必须有文本依据）
+
+
+def _normalize_traits(raw_traits, raw_basis) -> tuple[dict, dict, dict]:
+    """校验并归一 LLM 产出的 `traits` / `basis`。返回 `(traits, basis, report)`。
+
+    规则（见设计草案 §七）：
+    - 只认 `TRAIT_DIMS` 里的 12 个键；**越界夹紧到 ±10**；非整数取整；
+    - **缺键补 0**（不是失败——但计入 report 供观测，正常应当 12 键齐全）；
+    - `basis` 只保留 `text|slot|peer`；缺省即 text；
+    - 🔴 **越权推断**：`basis != text` 的维度若 |值| > `TRAIT_INFER_MAX`（4），夹紧到 ±1 并计入 report
+      —— 极端档只能来自文本依据，否则整库反派会长成一个样（`03 §8.3` 的"稳定地雷同"）。
+    """
+    report = {"clamped": [], "missing": [], "over_inferred": [], "omitted": False}
+    # **非人槽位允许整体省略**（2026-09-16 用户拍板）：组织/势力/群体没有"性格"，
+    # 硬填会退化成"全 +1"（实测「接纳主角的新势力」12 维全 +1，在数值检索里是噪声）。
+    if not raw_traits or not isinstance(raw_traits, dict):
+        report["omitted"] = True
+        return {}, {}, report
+    basis_in = raw_basis if isinstance(raw_basis, dict) else {}
+    out: dict[str, int] = {}
+    out_basis: dict[str, str] = {}
+    for k in TRAIT_DIMS:
+        v = (raw_traits or {}).get(k) if isinstance(raw_traits, dict) else None
+        if v is None:
+            out[k] = 0
+            report["missing"].append(k)
+        else:
+            try:
+                iv = int(round(float(v)))
+            except (TypeError, ValueError):
+                iv = 0
+                report["missing"].append(k)
+            if abs(iv) > 10:
+                report["clamped"].append(f"{k}={iv}")
+                iv = max(-10, min(10, iv))
+            out[k] = iv
+        b = str(basis_in.get(k) or "text").strip().lower()
+        b = b if b in ("text", "slot", "peer") else "text"
+        if b != "text":
+            if abs(out[k]) > TRAIT_INFER_MAX:
+                report["over_inferred"].append(f"{k}={out[k]}({b})→±1")
+                out[k] = 1 if out[k] > 0 else -1
+            out_basis[k] = b
+    return out, out_basis, report
+
+
+# ---------------------------------------------------------------------------
+# L2 角色画像：**零调用**聚合（2026-09-16 用户拍板，方案 A）
+# ---------------------------------------------------------------------------
+def _snap_anchor(v: float) -> int:
+    """把数值**吸附到最近的锚点**（并列时取绝对值小的，即偏保守）。
+
+    🔴 为什么必须吸附：观测**偶数个**时 `statistics.median` 会取中间两值的均值 →
+    可能落在档位之间（实测 `[4,-4] → 0`、`[1,4] → 2.5`），
+    那样就破坏了「档位可比」（检索时 +2 与 +4/0 是什么关系？）。
+
+    ⚠️ `TRAIT_ANCHORS` 只存**正向量级**，这里展开成 ± 全集（否则 −7 会被吸成 0 ——
+    实测踩过：单条观测 −7 结果返回 0，负值全被吃掉）。
+    """
+    cands = _ANCHORS_SIGNED
+    return min(cands, key=lambda a: (abs(v - a), abs(a)))
+
+
+def _median_profile(observations: list) -> tuple[dict, dict]:
+
+    """把同一角色的多次 traits 观测聚合成一个画像（纯函数，可单测）。
+
+    - 逐维取**中位数**：抗"局部带偏"（一直无恶不作、某篇做了两件好事 → 中位**不会翻正**）；
+      且观测值都落在 9 档锚点上 → **中位数仍是锚点**，保持"档位可比"
+      （平均会造出 +3.7 这种档间值，检索时无法与锚点比较）。
+    - 返回 `(traits, meta)`；`meta["spread"]` 记逐维极差（大 = 该维度观测不稳，
+      可能是**角色弧光**、也可能是噪声；区分二者需要"弧序"，属模型版能力）。
+    - 观测为空/无效 → `({}, {})`（调用方据此**不写**，避免空值覆盖）。
+    """
+    import statistics as _st
+    sets = [t for t in observations if isinstance(t, dict) and t]
+    if not sets:
+        return {}, {}
+    traits: dict[str, int] = {}
+    spread: dict[str, int] = {}
+    for k in TRAIT_DIMS:
+        vals = [int(t[k]) for t in sets if isinstance(t.get(k), (int, float))]
+        if not vals:
+            continue
+        traits[k] = _snap_anchor(_st.median(vals))     # 偶数个观测的均值会离档 → 吸附回锚点
+        rng = max(vals) - min(vals)
+        if rng:
+            spread[k] = rng
+    return traits, {"n": len(sets), "spread": spread}
+
+
+def aggregate_profiles(db: Session, book_name: str | None = None) -> dict:
+    """**零调用**：把「同一角色在多个模板里被 AI 打的 traits」聚合为角色画像，写回 `book_aliases`。
+
+    🔴 为什么必须独立成层（而不是"凝练时顺手做"）：凝练调用的视野是**一组相似弧**，
+    而同一个角色会出现在多个组里 → 每次只看到一块碎片 → 逐组打分**必然漂移**
+    （实测：九星「主角」在 9 个模板里拿到 9 套分，12 维极差合计 40、平均每维差 3.3 档）。
+    角色画像的属性是「**这个角色在本书里是什么人**」，**与模板如何分组无关** → 独立、可重算。
+
+    幂等：可反复跑；没有任何观测的角色**不写空值**（不覆盖已有画像）。
+    """
+    from app.models.orm import BookAliasORM, PlotTemplateORM   # 懒加载，避免顶层耦合
+    q = db.query(BookAliasORM)
+    if book_name:
+        q = q.filter(BookAliasORM.book_name == book_name)
+    aliases = q.all()
+    tpls = db.query(PlotTemplateORM).all()
+
+    obs: dict[tuple, list] = {}
+    src: dict[tuple, list] = {}
+    for t in tpls:
+        for c in ((t.structure or {}).get("cast") or []):
+            tr = c.get("traits")
+            if not isinstance(tr, dict) or not tr:
+                continue
+            for s in (c.get("srcs") or []):
+                key = (str(s.get("book") or ""), str(s.get("alias") or ""))
+                obs.setdefault(key, []).append(tr)
+                src.setdefault(key, []).append(t.name)
+
+    written = skipped = 0
+    for a in aliases:
+        key = (a.book_name, a.alias)
+        got = obs.get(key) or []
+        if not got:
+            skipped += 1
+            continue                      # **无观测 → 一律不动**（绝不拿空值覆盖已有画像）
+        traits, meta = _median_profile(got)
+        if not traits:
+            continue
+        meta["templates"] = sorted(set(src.get(key) or []))[:20]
+        a.traits, a.traits_meta = traits, meta
+        written += 1
+    db.commit()
+    logger.info(f"[plot_distill] 角色画像聚合（零调用）：扫描 {len(aliases)} 个角色 → "
+                f"写入 {written} 个，无观测跳过 {skipped} 个；模板池 {len(tpls)} 个")
+    return {"aliases": len(aliases), "written": written, "skipped": skipped,
+            "templates_scanned": len(tpls)}
+
+
+
 def _normalize_cast(raw, arcs: list[dict], db: Session) -> list[dict]:
     """校验并归一 LLM 产出的 cast（LLM 会编槽位、编溯源、写源书专名）。
 
@@ -152,7 +304,7 @@ def _normalize_cast(raw, arcs: list[dict], db: Session) -> list[dict]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        slot = str(item.get("slot") or "").strip()[:12]
+        slot = str(item.get("slot") or "").strip()[:24]
         if not slot or slot in seen:
             continue
         srcs = []
@@ -165,18 +317,36 @@ def _normalize_cast(raw, arcs: list[dict], db: Session) -> list[dict]:
                 srcs.append({"book": book, "alias": alias})
             else:
                 dropped += 1
+        # 2026-09-18 修正：srcs 全非法时**保留槽位、srcs 置空**（原"整个槽位丢弃"会把单弧
+        # 凝练的 cast 清空——实测太荒 68 条模板 cast 全 0）。槽位价值=功能位+位阶+12维性格，
+        # 溯源缺失只影响"来自哪本书"，不该让整个槽位消失。跨书凝练同理受益。
         if not srcs:
-            continue
-        beats = [str(x).strip()[:20] for x in (item.get("beats") or []) if str(x).strip()][:5]
+            logger.warning(f"[plot_distill] 槽位「{slot}」溯源非法（LLM 编的代称），保留槽位但 srcs 置空")
+        beats = [str(x).strip()[:40] for x in (item.get("beats") or []) if str(x).strip()][:8]
         desc = str(item.get("desc") or "").strip()
         if desc:
             desc = anonymize_text(desc, strong)      # LLM 写的 desc 也要过匿名化
-        else:
+        elif srcs:
+            # 回填「该代称在本书的原始描述」。⚠️ 必须判 srcs 非空：上面 2026-09-18 的
+            # "保留槽位、srcs 置空"修正让 srcs 可能为空，此处若不判会 IndexError
+            # （槽位被静默丢弃，整组凝练记 failed）—— 见 04 记录。
             desc = desc_of.get((srcs[0]["book"], srcs[0]["alias"]), "")
+        else:
+            desc = ""       # 槽位保留但无溯源、LLM 也没写 desc → 留空，不猜
+        # L2：位阶 + 性格刻度（2026-09-16）
+        ranks = [str(x).strip()[:24] for x in (item.get("ranks") or []) if str(x).strip()][:5]
+        ranks = [anonymize_text(r, strong) for r in ranks]      # 位阶也可能被写出专名（如"云岚宗宗主"）
+        traits, basis, trep = _normalize_traits(item.get("traits"), item.get("basis"))
+        if trep["missing"] or trep["over_inferred"]:
+            logger.info(f"[plot_distill] 槽位「{slot}」traits 归一："
+                        f"缺 {trep['missing']}｜越权推断 {trep['over_inferred']}")
         out.append({
             "slot": slot,
-            "desc": desc[:60],
-            "mode": str(item.get("mode") or "").strip()[:6],
+            "desc": desc[:300],   # 2026-09-17 放开：60 → 300（cast 描述是推断性格/位阶的关键输入）
+            "mode": str(item.get("mode") or "").strip()[:12],
+            "ranks": ranks,
+            "traits": traits,
+            "basis": basis,
             "beats": beats,
             "srcs": srcs,
         })
@@ -342,10 +512,12 @@ def _distill_prompt(arcs: list[dict]) -> str:
         "3. `genre_tags`：2~4 个题材或场景标签；\n"
         "4. `structure`：拆成 3~5 个 `phases`（阶段，如 开局/发展/高潮/收尾），每个 phase 下有若干 `beats`（节拍）；\n"
         "   每个 beat 用 `variants` 记录**各弧在这个节拍上的不同处理方式**"
-        "（`src` 填来源书名，`how` 填 15~30 字的具体处理）—— 这是模板最有价值的部分；\n"
+        "（`src` 填来源书名，`how` 填 **100~160 字的抽象处理**（起因/经过/结果）：🔴 不得出现任何源书人名/功法名/势力名/物品名/地名，"
+        "   🔴 cast 的 `srcs.alias` 必须原样使用各弧【本弧角色槽位】给出的代称，禁止自创（自创过不了溯源校验），"
+        "一律用功能词替代——主角/师长/敌对长老/某宗/关键功法/关键信物）—— 这是模板最有价值的部分；\n"
         "5. `pitfalls`：2~4 条这类套路的常见翻车点；\n"
         "6. `rhythm`：各阶段大致章数配比（如 \"2-3-3-2\"）。\n"
-        "7. `cast`：**3~6 个「功能槽位」**，写清这个套路需要什么功能的角色（用于把槽位映射到\n"
+        "7. `cast`：**3~6 个「功能槽位」**（🔴 少于 3 个视为不合格），写清这个套路需要什么功能的角色（用于把槽位映射到\n"
         "   作者自己小说的真实角色）。每个槽位四个字段：\n"
         "   - `slot`：功能名（4~8 字），**写功能不写代称**，如 引路人师长 / 退婚的未婚妻 /\n"
         "     敌对宗门长老 / 忠心的同伴 / 高高在上的长辈；\n"
@@ -355,6 +527,42 @@ def _distill_prompt(arcs: list[dict]) -> str:
         "     包括人名/宗门名/家族名/地名/物品名/功法名/境界名（如某宗、某玉佩、斗之气、清风观）。\n"
         "     需要提及时用功能词替代：把「某宗」写成「敌对宗门」，把物品写成「关键信物」，把境界写成「高阶修为」；\n"
         "   - `mode`：`助力` / `阻碍` / `见证` / `对手` 四选一；\n"
+        "   - `ranks`：**位阶**，1~3 个短标签（如 家族高层 / 长老 / 宗门执事 / 商贾 / 散修 / 皇室）。\n"
+        "     ⚠️ 位阶要填：同一个性格在不同位阶表现完全不同（「自私的长老」是结党营私，\n"
+        "     「自私的散修」是偷奸耍滑），下游做「性格 × 位阶」组合判断时要靠它。不得含源书专名；\n"
+        "   - `traits`：**性格刻度**，下列 12 个维度**每个都要给一个整数**。刻度 -10~+10，\n"
+        "     但只允许取 **0 / ±1 / ±4 / ±7 / ±10** 这 9 个锚点（+10 = 正端拉满）：\n"
+        "       利他↔自私 altruism：+10 舍己为人、为苍生赴死 ｜ -10 唯利是图、损人利己\n"
+        "       信义↔背信 honor：+10 一诺千金、不出卖同伴 ｜ -10 翻脸无情、卖友求荣\n"
+        "       仁慈↔狠辣 mercy：+10 得饶人处且饶人 ｜ -10 斩草除根、视人命如草芥\n"
+        "       坚毅↔易摧 resolve：+10 百折不挠、越挫越强 ｜ -10 一触即溃、受挫认命\n"
+        "       果决↔犹豫 decisiveness：+10 当机立断、雷厉风行 ｜ -10 优柔寡断、错失时机\n"
+        "       自律↔放纵 discipline：+10 克己守戒、管得住自己 ｜ -10 纵欲无度、毫无底线\n"
+        "       冒险↔稳健 risk：+10 敢赌敢拼、敢拿命换机会 ｜ -10 稳字当头、绝不冒无谓之险（此维两端无善恶）\n"
+        "       理性↔冲动 rationality：+10 冷静算计、谋定后动 ｜ -10 血性上头、凭意气行事\n"
+        "       城府↔直率 guile：+10 深藏不露、喜怒不形于色 ｜ -10 心直口快、藏不住事\n"
+        "       理想↔务实 idealism：+10 心怀天下、有所不为 ｜ -10 只认利害、给钱就办事\n"
+        "       热忱↔冷漠 warmth：+10 古道热肠、主动亲近人 ｜ -10 冷若冰霜、对谁都无感\n"
+        "       强势↔随和 dominance：+10 唯我独尊、要求服从 ｜ -10 习惯退让、不争不抢\n"
+        "     🔴 填法（重要，逐条照做）：\n"
+        "       · 有节拍依据的维度按依据填，**不要**写进 `basis`（缺省即 text）；\n"
+        "       · **文中没体现的维度不要填 0**：按「该位阶/功能位的群体倾向」或「与已填维度的顺势一致性」\n"
+        "         推断，取值 **±1（最多 ±4）**，并把该维度来源写进 `basis`（\"slot\" 或 \"peer\"）；\n"
+        "       · **±7 / ±10 必须有节拍文本依据**，推断一律不许给极端档；\n"
+        "       · 🔴 **不许按「身份标签」成套推断**（最容易犯的错，务必逐条自查）：\n"
+        "         **主角不一定是**无私 / 理性 / 仁慈的 —— 有自私的主角、冲动的主角、杀伐果断的主角；\n"
+        "         **敌人不一定是**狠辣 / 背信的 —— 有讲义气、光明磊落、一诺千金的对手；\n"
+        "         长辈不一定是慈祥的、商人不一定是奸诈的、宗门高层不一定是公正的……\n"
+        "         **每条只按该角色在这条弧里的实际行为判断**，不要从「他是主角/反派/长老」推。\n"
+        "       · 🔴 **道德三维度（利他 / 信义 / 仁慈）尤其不许用「位阶群体倾向」成套推断**：\n"
+        "         这三维要么有本节拍的文本依据，要么只给 **±1 的顺势小幅推断**（并标 `peer`）；\n"
+        "         只有**非道德维度**（强势 / 城府 / 理性 / 冒险 / 果决 等）才允许依据位阶倾向推。\n"
+        "       · **矛盾要保留**：对家人极好却对外人极狠 = 人物立体，不要为「一致性」推平；\n"
+        "       · **不许成套连锁**：自私 ≠ 必然背信、更 ≠ 必然狠辣，每维独立判断；\n"
+        "       · 0 只留给「连定位都没有的角色」；\n"
+        "       · **若该槽位是组织/势力/群体而不是个人**（如「接纳主角的新势力」「某宗门」），\n"
+        "         `traits` **整体省略**（不要硬填——组织没有性格，硬填会变成一排 +1 噪声）；\n"
+        "   - `basis`：只列**非文本来源**的维度，如 `{\"mercy\":\"peer\",\"guile\":\"slot\"}`；有依据的不用列；\n"
         "   - `beats`：该槽位主要出现在哪几个节拍（填节拍名）；\n"
         "   - `srcs`：**必须填**，从上方各弧「本弧用到的角色槽位」里挑出**对应这个功能位的代称**，\n"
         "     格式 `[{\"book\":\"书名\",\"alias\":\"友·配角4\"}]`（**照抄，不要改写、不要编造**）。\n"
@@ -364,7 +572,10 @@ def _distill_prompt(arcs: list[dict]) -> str:
         '{"name":"...","logline":"...","genre_tags":["..."],'
         '"structure":{"phases":[{"phase":"...","beats":[{"beat":"...",'
         '"variants":[{"src":"书名","how":"..."}]}]}]},'
-        '"cast":[{"slot":"...","desc":"...","mode":"助力","beats":["..."],'
+        '"cast":[{"slot":"...","desc":"...","mode":"助力","ranks":["家族高层","长老"],'
+        '"traits":{"altruism":-4,"honor":7,"mercy":-1,"resolve":4,"decisiveness":1,'
+        '"discipline":-1,"risk":1,"rationality":4,"guile":4,"idealism":-1,"warmth":1,"dominance":4},'
+        '"basis":{"mercy":"peer"},"beats":["..."],'
         '"srcs":[{"book":"书名","alias":"代称"}]}],'
         '"pitfalls":["..."],"rhythm":"..."}\n\n'
         + "\n\n".join(blocks)
@@ -441,10 +652,10 @@ def distill_template(db: Session, arcs: list[dict], *, name_hint: str | None = N
 # 4. 一键流程：聚类 → 逐组凝练 → 入库
 # ---------------------------------------------------------------------------
 def _distill_fingerprint(db: Session, book_names: list[str] | None,
-                         threshold: float, min_arcs: int) -> str:
+                         threshold: float, min_arcs: int, min_books: int = 1) -> str:
     """凝练输入指纹（08-B8③，2026-09-16）：弧集合 + 聚类参数任一变化则指纹变。
 
-    指纹 = sha256(书池 + threshold + min_arcs + collect_arcs 全量输出)。
+    指纹 = sha256(书池 + threshold + min_arcs + min_books + collect_arcs 全量输出)。
     输入没变 → 重跑只会产出等价的组 → 纯烧钱 → 跳过。`default=str` 兜底日期等非 JSON 类型。
     """
     arcs = collect_arcs(db, book_names)
@@ -452,6 +663,7 @@ def _distill_fingerprint(db: Session, book_names: list[str] | None,
         "books": sorted(book_names) if book_names else None,
         "threshold": threshold,
         "min_arcs": min_arcs,
+        "min_books": min_books,
         "arcs": arcs,
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -460,11 +672,16 @@ def _distill_fingerprint(db: Session, book_names: list[str] | None,
 
 def distill_all(db: Session, *, book_names: list[str] | None = None,
                 threshold: float = CLUSTER_THRESHOLD,
-                min_arcs: int = 1, replace_drafts: bool = True,
+                min_arcs: int = 1, min_books: int = 1, replace_drafts: bool = True,
                 force: bool = False) -> dict:
     """聚类全部弧 → 每组凝练一个模板 → 入库（draft）。
 
     `min_arcs` 可过滤太小的组（如只要"至少 2 个弧才算跨书套路"时设 2）。
+    `min_books`（2026-09-17 加，用户拍板 C）：组内**至少来自几本书**才凝练 ——
+    设 2 = **只出跨书套路模板**。理由：variants 的价值在"同一节拍各书的不同处理"，
+    单书组（哪怕 3 条弧）写法趋同，抽象度不足；且 `--min-arcs 1` 时单书弧会灌出大量
+    彼此相似的模板（实测斗破 34 弧 → 34 个模板）。**单书弧不产出，只积累**，
+    等库里有相似弧时自然成组。指纹含 `min_books`（改门槛会触发重算）。
     `replace_drafts=True`（默认）会**先清掉 draft 模板再重建** —— 避免反复跑时重复堆积；
     `status="reviewed"`（人工审核过）的模板**不受影响**。
 
@@ -480,7 +697,7 @@ def distill_all(db: Session, *, book_names: list[str] | None = None,
     """
     pool_key = "|".join(sorted(book_names)) if book_names else "all"
     fp_key = f"plot_distill.fingerprint.{pool_key}"
-    fp = _distill_fingerprint(db, book_names, threshold, min_arcs)
+    fp = _distill_fingerprint(db, book_names, threshold, min_arcs, min_books)
     if not force and app_config.get(db, fp_key) == fp:
         logger.info(f"[plot_distill] 幂等跳过：凝练输入未变化（指纹一致），pool={pool_key}。"
                     f"force=True 可强制重跑")
@@ -520,6 +737,12 @@ def distill_all(db: Session, *, book_names: list[str] | None = None,
     arcs = collect_arcs(db, book_names)
     groups = cluster_arcs(db, arcs, threshold=threshold)
     groups = [g for g in groups if len(g["arcs"]) >= max(1, min_arcs)]
+    if min_books > 1:
+        before = len(groups)
+        groups = [g for g in groups
+                  if len({a["book"] for a in g["arcs"]}) >= min_books]
+        logger.info(f"[plot_distill] min_books={min_books}：{before} 组 → {len(groups)} 组"
+                    f"（单书组不产出，只积累；--min-books 1 可改回）")
 
     created, failed = [], []
     for g in groups:
@@ -616,3 +839,18 @@ def export_template_report(db: Session, out_path: str | None = None,
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_text("\n".join(out), encoding="utf-8")
     return out_path
+
+
+def scrub_en(text: str | None) -> str | None:
+    """清除中英混杂的 ASCII 单词（如"凭借 superior 的身法"）。
+
+    模型偶尔会把英文形容词/名词直接写进中文叙述；对模板库是硬伤（注入后 AI 会学着中英混杂）。
+    只删 ASCII 字母串，保留数字与标点；随后压缩空格与"的的"。
+    """
+    if not text:
+        return text
+    s = re.sub(r"[A-Za-z]{2,}", "", text)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    s = s.replace("的的", "的").replace(" 的", " 的")
+    s = re.sub(r"^(凭借|通过|利用|以)\s+", r"\1", s)
+    return s

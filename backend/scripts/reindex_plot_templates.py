@@ -54,6 +54,8 @@ def main() -> int:
                     help="只统计预期块数，不写库不调 embedding API")
     ap.add_argument("--out", default=None,
                     help="结果同时写入该文件（管道/控制台捕获中文不可靠时的保底）")
+    ap.add_argument("--status", default=None,
+                    help="只处理该状态的模板（如 active；默认全部，含已归档）")
     ap.add_argument("--limit", type=int, default=None,
                     help="只处理前 N 个模板（先小批量验证 embedding 可用再放量）")
     args = ap.parse_args()
@@ -89,7 +91,10 @@ def main() -> int:
         connect_args={"check_same_thread": False},
     )
     db = sessionmaker(bind=eng)()
-    rows = db.query(PlotTemplateORM).order_by(PlotTemplateORM.created_at).all()
+    _q = db.query(PlotTemplateORM)
+    if args.status:
+        _q = _q.filter(PlotTemplateORM.status == args.status)
+    rows = _q.order_by(PlotTemplateORM.created_at).all()
     if args.limit:
         rows = rows[:args.limit]
     print(f"模板总数: {len(rows)}" + (f"（--limit 截取）" if args.limit else ""))

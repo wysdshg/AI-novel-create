@@ -62,9 +62,18 @@ def structure_beats(t: PlotTemplateORM) -> list[dict]:
 
 
 def _variants_text(variants: list) -> str:
-    return "；".join(
-        f"（{v.get('src', '?')}）{v.get('how', '')}" for v in variants if isinstance(v, dict)
-    )
+    """变体 → 拼接文本。2026-09-19 起：`desc`（该环的具体剧情概括）存在时一并拼入——
+    原子骨架的 `how` 只有弧名，语义信息太少，既不利界面展示也不利 beat 级向量召回。
+    ⚠️ 改本函数后**存量向量块全部失效** → 必须跑 scripts/reindex_plot_templates.py 回填。"""
+    parts = []
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        seg = f"（{v.get('src', '?')}）{v.get('how', '')}"
+        if v.get("desc"):
+            seg += f"：{v['desc']}"
+        parts.append(seg)
+    return "；".join(parts)
 
 
 def beat_chunks(t: PlotTemplateORM) -> list[str]:
@@ -146,6 +155,23 @@ def archetype_text(c: dict) -> str:
     `slot` 名前置的理由同 `cast_slot_text`：作者口述常常直接说槽位名。
     """
     parts = [str(c.get("slot") or "")]
+    # L2 升级（2026-09-16）：位阶 + 12 维性格刻度 → 让**文本检索也能吃到性格**；
+    # 原始数值仍留在 structure.cast[].traits 里供数值过滤/排序。
+    # ⚠️ 改本函数后**存量向量块全部失效** → 必须跑 scripts/reindex_plot_templates.py 回填。
+    ranks = [str(r).strip() for r in (c.get("ranks") or []) if str(r).strip()]
+    if ranks:
+        parts.append("位阶：" + "/".join(ranks))
+    traits = c.get("traits")
+    if isinstance(traits, dict) and traits:
+        try:
+            from app.services.plot_distill import TRAIT_DIMS      # 懒加载，避免循环依赖
+            names = TRAIT_DIMS
+        except Exception:  # noqa: BLE001
+            names = {}
+        seg = [f"{names.get(k, k)}{int(v):+d}" for k, v in traits.items()
+               if isinstance(v, (int, float)) and int(v) != 0]
+        if seg:
+            parts.append("性格：" + "·".join(seg))
     if c.get("desc"):
         parts.append(str(c["desc"]))
     if c.get("mode"):
@@ -284,6 +310,10 @@ def _tag_filter(db: Session, scale: str | None, tags: list[str]) -> list[PlotTem
     q = db.query(PlotTemplateORM)
     if scale:
         q = q.filter(PlotTemplateORM.scale == scale)
+    # 🔴 退役模板不参与检索（2026-09-19 加，配合 scripts/retire_plot_templates.py）：
+    #    status='archived' = 已退役（旧方案模板退出检索，但数据完整保留、可一条 UPDATE 回滚）。
+    #    当前库里 164 条全是 draft → 本过滤不改变现有行为。
+    q = q.filter(PlotTemplateORM.status != "archived")
     rows = q.all()
     if not tags:
         return rows
@@ -377,6 +407,8 @@ def search(db: Session, *, query: str, queries: list[str] | None = None,
     for tid, info in by_template.items():
         t = get(db, tid)
         if t is None:
+            continue
+        if (t.status or "") == "archived":     # 退役模板不参与向量结果（2026-09-19）
             continue
         if scale and t.scale != scale:
             continue

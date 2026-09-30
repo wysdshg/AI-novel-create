@@ -134,18 +134,24 @@ def test_pick_cast_falls_back_when_nothing_hits(seeded):
 # ---------------------------------------------------------------------------
 # 4. LLM 产出的 cast 校验归一
 # ---------------------------------------------------------------------------
-def test_normalize_cast_drops_fabricated_srcs(seeded):
+def test_normalize_cast_keeps_slot_when_srcs_invalid(seeded):
+    """2026-09-18 行为变更：srcs 全非法时**保留槽位、srcs 置空**（不再整槽丢弃）。
+
+    原因：单弧凝练里模型常编造代称，旧规则会把 cast 清空（实测太荒 68 条模板 cast 全 0）；
+    槽位价值=功能位+位阶+12 维性格，与能否溯源无关。
+    """
     raw = [
         {"slot": "引路人师长", "desc": "主角的导师", "mode": "助力", "beats": ["异象触发"],
          "srcs": [{"book": "斗破", "alias": "友·配角4"},
                   {"book": "不存在的书", "alias": "友·配角1"}]},
-        {"slot": "幽灵槽位", "srcs": [{"book": "斗破", "alias": "根本没这个人"}]},  # 全非法 → 整槽丢弃
+        {"slot": "幽灵槽位", "srcs": [{"book": "斗破", "alias": "根本没这个人"}]},  # 全非法 → 保留、srcs 空
         {"slot": "引路人师长", "srcs": [{"book": "斗破", "alias": "主角"}]},        # 重名 → 丢弃
     ]
     out = pd._normalize_cast(raw, [{"book": "斗破"}], seeded)
-    assert len(out) == 1
+    assert len(out) == 2
     assert out[0]["slot"] == "引路人师长"
     assert out[0]["srcs"] == [{"book": "斗破", "alias": "友·配角4"}]
+    assert out[1]["slot"] == "幽灵槽位" and out[1]["srcs"] == []
 
 
 def test_normalize_cast_caps_and_tolerates_garbage(seeded):
@@ -216,8 +222,8 @@ def test_distill_template_writes_cast_into_structure(seeded, monkeypatch):
     assert o.structure["phases"][0]["phase"] == "开局"
 
 
-def test_distill_template_without_valid_cast_omits_key(seeded, monkeypatch):
-    """没有任何合法槽位时不写 cast 键（空键会被下游误读成"这模板没有角色"）。"""
+def test_distill_template_keeps_cast_even_if_srcs_invalid(seeded, monkeypatch):
+    """2026-09-18 行为变更：槽位保留（srcs 置空），故 cast 键保留且 cast_slots=1。"""
     payload = {"name": "无角色模板", "structure": {"phases": []},
                "cast": [{"slot": "幽灵", "srcs": [{"book": "斗破", "alias": "不存在"}]}]}
     monkeypatch.setattr(pd, "_ds_post", lambda *a, **k: json.dumps(payload, ensure_ascii=False))
@@ -226,5 +232,5 @@ def test_distill_template_without_valid_cast_omits_key(seeded, monkeypatch):
 
     o, _raw = pd.distill_template(seeded, [_arc()])
     assert o is not None
-    assert "cast" not in (o.structure or {})
-    assert o.source_stats["cast_slots"] == 0
+    assert len((o.structure or {}).get("cast") or []) == 1
+    assert o.source_stats["cast_slots"] == 1
