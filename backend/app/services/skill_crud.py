@@ -100,14 +100,20 @@ def delete_skill(db: Session, project_id: str, skill_id: str) -> bool:
     return True
 
 
-def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -> dict:
+def sync_from_extract(db: Session, project_id: str, new_entities: list | None,
+                      chapter_characters: list | None = None,
+                      chapter_no: int | None = None) -> dict:
     """AI 抽取的 kind=skill 新技能 → 落库（幂等，重名跳过；**标 ai_generated**，docs/09 M8）。
 
     E3（docs/03 阶段E）：命中全局条目库惯例词（御剑术/火球术…）不建本地条目，归一指向条目库。
+    A7（2026-10-01 拍板）：AI 填了 owner（谁掌握）→ 连「掌握技能」边；新建与重名两分支都连
+    （重摄取可为存量孤儿技能补边）。命中惯例词归一的全局条目不连边。
     """
     import logging
     _log = logging.getLogger(__name__)
-    stats = {"created": 0, "skipped": 0, "normalized": 0}
+    from app.services import entity_relation_crud as er
+    stats = {"created": 0, "skipped": 0, "normalized": 0, "linked": 0}
+    chapter_names = {str(x).strip() for x in (chapter_characters or []) if str(x).strip()}
     for item in new_entities or []:
         if not isinstance(item, dict):
             continue
@@ -122,17 +128,25 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
             continue
         dup = db.query(SkillORM).filter_by(project_id=project_id, name=name).first()
         if dup is not None:
+            # 重名不覆盖，但归属边照连（重摄取为存量技能补边）
+            if er.link_owner_from_extract(db, project_id, item.get("owner"), chapter_names,
+                                          dup.id, "skill", "掌握技能", chapter_no):
+                stats["linked"] += 1
             stats["skipped"] += 1
             continue
         brief = str(item.get("brief") or "").strip()
-        db.add(SkillORM(
+        o = SkillORM(
             id=uuid.uuid4().hex, project_id=project_id,
             name=name,
             skill_type=str(item.get("category") or "").strip() or None,
             summary=brief or None,
             full_desc=brief or None,
             ai_generated=True,
-        ))
+        )
+        db.add(o)
         db.flush()
+        if er.link_owner_from_extract(db, project_id, item.get("owner"), chapter_names,
+                                      o.id, "skill", "掌握技能", chapter_no):
+            stats["linked"] += 1
         stats["created"] += 1
     return stats

@@ -101,6 +101,41 @@ def remove_edge(db: Session, project_id: str, a_id: str, b_id: str, relation_typ
     return n
 
 
+def link_owner_from_extract(db: Session, project_id: str, owner_name, chapter_names: set | None,
+                            target_id: str, target_type: str, relation_type: str,
+                            chapter_no: int | None = None) -> bool:
+    """抽取链归属连边（A7 口径，2026-10-01 拍板：AI 抽实体时顺带判定关系连边）。
+
+    item/skill 抽取落库后按 AI 给的 owner（谁持有/谁掌握）连 character 边。双防线防幻觉
+    （照 relation_crud.sync_from_extract 范式）：
+      1. owner 必须出现在本章 characters 名单（名单缺失时跳过此防线，仍走防线2）；
+      2. owner 名字必须能精确解析到库内角色——解析不到（角色尚未入库）先不连，
+         等角色入库后重摄取即可补上。
+    幂等由 upsert_edge 保证；只 add + flush 不 commit（嵌入摄取事务，调用方统一提交）。
+    返回是否建了边。
+    """
+    owner = str(owner_name or "").strip()
+    if not owner:
+        return False
+    if chapter_names and owner not in chapter_names:
+        return False  # 防线1：owner 不在本章出场名单，视为幻觉
+    from app.models.orm import CharacterORM
+    row = db.query(CharacterORM).filter_by(project_id=project_id, name=owner).first()
+    if row is None:
+        return False  # 防线2：库内解析不到（角色还没入库）
+    try:
+        upsert_edge(db, project_id, row.id, "character", target_id, target_type,
+                    relation_type,
+                    note=(f"第{chapter_no}章抽取" if chapter_no else None),
+                    commit=False)
+        return True
+    except Exception as e:  # noqa: BLE001 - 连边失败不影响抽取主流程
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[entity_relation] 抽取连边失败({relation_type}): {type(e).__name__}: {e}")
+        return False
+
+
 def sync_faction_edges(db, o: FactionORM, commit: bool = True) -> None:
     """按 faction 当前 leader_id/members 重写 领袖/隶属 边（先删后建，幂等）。"""
     db.query(EntityRelationORM).filter_by(b_id=o.id, relation_type="领袖") \

@@ -76,7 +76,9 @@ def delete_item(db: Session, project_id: str, item_id: str) -> bool:
     return True
 
 
-def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -> dict:
+def sync_from_extract(db: Session, project_id: str, new_entities: list | None,
+                      chapter_characters: list | None = None,
+                      chapter_no: int | None = None) -> dict:
     """AI 抽取的 kind=item 新物品 → 落库（幂等，重名跳过；**标 ai_generated**）。
 
     分级（docs/09 M8）：name/category 必填；summary 由 AI 生成但可辨识（作者可改）。
@@ -84,9 +86,13 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
     E3（docs/03 阶段E）：抽取落库前先查全局条目库（主名/别名），命中「类型惯例词」
     （洗髓丹/灵石/乾坤袋…）即**不建本地条目**——通用词归一指向条目库，
     避免各书重复写描述（描述落库即定死，重复建无法回收）。
+    A7（2026-10-01 拍板）：AI 填了 owner（谁持有）→ 连「持有物品」边；新建与重名
+    两分支都连（重摄取可为存量孤儿物品补边）。命中惯例词归一的全局条目不连边。
     只 add + flush 不 commit（调用方统一提交，照 faction_crud 范式）。
     """
-    stats = {"created": 0, "skipped": 0, "normalized": 0}
+    from app.services import entity_relation_crud as er
+    stats = {"created": 0, "skipped": 0, "normalized": 0, "linked": 0}
+    chapter_names = {str(x).strip() for x in (chapter_characters or []) if str(x).strip()}
     for item in new_entities or []:
         if not isinstance(item, dict):
             continue
@@ -101,11 +107,15 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
             continue
         dup = db.query(ItemORM).filter_by(project_id=project_id, name=name).first()
         if dup is not None:
+            # 重名不覆盖，但归属边照连（重摄取为存量物品补边）
+            if er.link_owner_from_extract(db, project_id, item.get("owner"), chapter_names,
+                                          dup.id, "item", "持有物品", chapter_no):
+                stats["linked"] += 1
             stats["skipped"] += 1
             continue
         brief = str(item.get("brief") or "").strip()
         now = _now()
-        db.add(ItemORM(
+        o = ItemORM(
             id=uuid.uuid4().hex, project_id=project_id,
             name=name,
             category=str(item.get("category") or "").strip() or None,
@@ -116,7 +126,11 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
             status="完好",
             ai_generated=True,
             created_at=now, updated_at=now,
-        ))
+        )
+        db.add(o)
         db.flush()
+        if er.link_owner_from_extract(db, project_id, item.get("owner"), chapter_names,
+                                      o.id, "item", "持有物品", chapter_no):
+            stats["linked"] += 1
         stats["created"] += 1
     return stats

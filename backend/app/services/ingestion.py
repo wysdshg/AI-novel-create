@@ -40,7 +40,8 @@ EXTRACT_SYSTEM = (
     '  "plot_points": ["关键事件，3~5条，每条一句话"],\n'
     '  "foreshadow_actions": [{"action": "bury/hint/resolve", "desc": "涉及的伏笔"}],\n'
     '  "new_entities": [{"kind": "character/faction/location/item/skill", "name": "名称", '
-    '"brief": "一句话说明", "category": "（item/skill 才填）分类如 丹药/武器/拳法/剑术"}],\n'
+    '"brief": "一句话说明", "category": "（item/skill 才填）分类如 丹药/武器/拳法/剑术", '
+    '"owner": "（item/skill 才填）谁持有这个物品/谁掌握这个技能，必须是 characters 里的人名，无主就空"}],\n'
     '  "relations": [{"subject": "角色A", "object": "角色B", "type": "A对B的称呼或关系词"}],\n'
     '  "char_changes": [{"name": "角色名", "change": "本章体现的转变（一句话）", '
     '"personality": "（可选）新的性格描述", "current_level": "（可选）新的境界/等级"}],\n'
@@ -61,7 +62,8 @@ EXTRACT_SYSTEM = (
     "name 必须是本书真实角色名；**没体现就不写、没有就给空数组**。"
     "这些变化只会成为**待作者确认的修订**（不会自动改角色卡），所以值得记全。\n"
     "🔴 new_entities 分级（docs/09 M8）：name 必填；kind 只能是 character/faction/location/item/skill；"
-    "item/skill 须给 category（丹药/武器/材料/拳法/剑术…自由词）；brief 一句话（会标 ai_generated，作者可改）。"
+    "item/skill 须给 category（丹药/武器/材料/拳法/剑术…自由词）和 owner（谁持有/谁掌握，"
+    "必须出自 characters，无主就空）；brief 一句话（会标 ai_generated，作者可改）。"
     "物品/技能与已有条目同名就不要再报（不覆盖已有描述）。"
 )
 
@@ -233,6 +235,8 @@ def normalize_extract(data: dict) -> dict:
                 "name": name,
                 "brief": str(item.get("brief") or "").strip(),
                 "category": str(item.get("category") or "").strip() or None,
+                # A7（2026-10-01）：item/skill 的持有/掌握者，抽取链连「持有物品/掌握技能」边用
+                "owner": str(item.get("owner") or "").strip() or None,
             })
     out["new_entities"] = ne[:12]
 
@@ -520,10 +524,15 @@ def ingest_chapter(
             "factions": faction_crud.sync_from_extract(
                 db, project_id, extracted.get("new_entities")),
             # A4（docs/09 M8）：新物品/新技能自动落库（标 ai_generated；重名不覆盖）
+            # A7（2026-10-01 拍板）：AI 填 owner 时顺带连「持有物品/掌握技能」边
             "items": item_crud.sync_from_extract(
-                db, project_id, extracted.get("new_entities")),
+                db, project_id, extracted.get("new_entities"),
+                chapter_characters=extracted.get("characters"),
+                chapter_no=chapter.chapter_no),
             "skills": skill_crud.sync_from_extract(
-                db, project_id, extracted.get("new_entities")),
+                db, project_id, extracted.get("new_entities"),
+                chapter_characters=extracted.get("characters"),
+                chapter_no=chapter.chapter_no),
         }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[ingestion] 关系/势力回注失败: {type(e).__name__}: {e}")
