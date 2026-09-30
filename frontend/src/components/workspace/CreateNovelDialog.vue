@@ -64,7 +64,7 @@
       <!-- 挑选设定库：选择后该小说对话只注入选中的设定 -->
       <el-form-item label="设定选项">
         <el-button text type="primary" @click="settingVisible = !settingVisible">
-          {{ settingVisible ? '收起' : '挑选设定库' }}
+          {{ settingVisible ? '收起' : '挑选设定模板' }}
         </el-button>
         <span v-if="selectedSettingIds.length" class="cnd-setting-hint">已选 {{ selectedSettingIds.length }} 项</span>
       </el-form-item>
@@ -72,11 +72,11 @@
       <el-collapse-transition>
         <div v-if="settingVisible" class="cnd-setting">
           <div v-if="settingLoading" class="cnd-setting-hint">加载设定模板中…</div>
-          <el-empty v-else-if="!settingTemplateList.length" :image-size="48" description="暂无可选设定模板，请在「设定库」中创建并勾选「可被挑选」" />
+          <el-empty v-else-if="!settingTemplateList.length" :image-size="48" description="暂无可选设定模板，请在「设定库 → 设定模板」中创建" />
           <el-checkbox-group v-else v-model="selectedSettingIds" class="cnd-setting-list">
             <el-checkbox v-for="s in settingTemplateList" :key="s.id" :value="s.id" class="cnd-setting-item">
               <span class="cnd-setting-name">{{ s.name }}</span>
-              <el-tag size="small" effect="plain" class="cnd-setting-cat">{{ s.category }}</el-tag>
+              <el-tag size="small" effect="plain" class="cnd-setting-cat">{{ s.genre }}</el-tag>
             </el-checkbox>
           </el-checkbox-group>
           <div v-if="settingTemplateList.length" class="cnd-setting-count">
@@ -98,7 +98,7 @@ import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import { projectApi } from '@/api/projects'
 import { globalReferenceApi } from '@/api/reference'
-import { settingApi } from '@/api/setting'
+import { settingTemplateApi } from '@/api/setting'
 import { useProjectStore } from '@/store/project'
 
 const props = defineProps({ modelValue: Boolean })
@@ -146,7 +146,7 @@ async function loadGlobalRefs() {
 async function loadSettingTemplates() {
   settingLoading.value = true
   try {
-    settingTemplateList.value = await settingApi.templates()
+    settingTemplateList.value = await settingTemplateApi.list({})
   } catch {
     settingTemplateList.value = []
   } finally {
