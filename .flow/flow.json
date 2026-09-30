@@ -1278,9 +1278,9 @@
           "id": "G1",
           "type": "process",
           "name": "设定模板库改造",
-          "description": "设定库从『单条设定』改为『按题材一套一套』（Markdown 单文档：境界/货币/体系/规则/物价），新建小说按题材挑选；09-26 开工，代码未提交、验证证据待补",
+          "description": "✅ 2026-10-01 用户确认完成：设定库已按题材成套（库内 3 套实存——玄幻九境界/架空历史宋代框架/都市高武武道九阶），页面可见在用。代码已提交 c6b342a",
           "location": "backend/app/services/setting_template_crud.py",
-          "state": "in_progress",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
           "updatedAt": "2026-09-30T13:09:13.029Z"
         }
