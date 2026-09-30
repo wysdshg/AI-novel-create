@@ -295,9 +295,9 @@
           "id": "A6",
           "type": "end",
           "name": "验收收口",
-          "description": "端到端走一遍：建实体→抽取→检索注入→写作；确认老列可以不读了，文档合并收口",
-          "location": "",
-          "state": "planned",
+          "description": "✅ 2026-10-01 脚本验收通过。V1 新旧表对账 15=15；V2 双开关开启；V3 build_chapter_messages 实跑（原神是怎样练成的，hint 命中 5 角色）→ build_injection 699 字符（出场人物 5 人+关系网 15 边）确入最终 user 消息，无跳过警告；V4 entity_graph 一跳扩展 trace 健康。加上 A7 端到端（重摄取落库+检索注入非空）与 A5/E5 前端验收，全链闭环。⚠️ 唯一遗留：entity_graph（实体一跳扩展）仍读旧表 relations 且默认开启，停双写需后续把该读点迁到新表（不影响功能正确性）",
+          "location": "backend/app/core/context/builder.py",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
           "updatedAt": "2026-09-30T13:09:13.029Z"
         },
