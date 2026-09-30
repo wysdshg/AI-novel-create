@@ -284,9 +284,9 @@
           "id": "A5",
           "type": "process",
           "name": "前端分批接入",
-          "description": "分 4 批做前端：①角色库新字段✅ ③物品/技能页已挂路由（09-21，验收待确认）；剩 ②势力/地点新字段表单 ④关系网图谱。GraphRAG 已接入上下文构建器（开关 retrieval.graph_rag）",
-          "location": "frontend/src/views/ItemListView.vue 等",
-          "state": "in_progress",
+          "description": "✅ 2026-10-01 四批全部完成并验收：①角色库新字段（身份地位/当前等级/技能/关系网表单）②势力/地点新字段表单（势力范围/核心成员）③物品/技能页（物品库 11 条 AI 抽取实数据显示）④关系网图谱（SVG 图谱 15 角色·15 条关系边全渲染，节点按地位着色，连线带关系词，右侧详情面板带权重列表）。阶段A 仅剩 A6 端到端验收",
+          "location": "frontend/src/views/CharacterRelationView.vue",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
           "updatedAt": "2026-09-30T13:09:13.029Z",
           "doc": ".flow/docs/stage-a-frontend.md"
