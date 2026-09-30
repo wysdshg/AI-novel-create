@@ -488,6 +488,18 @@
         新角色：<b>{{ confirmingRow?.name }}</b>
         <template v-if="confirmingRow?.slot">（{{ confirmingRow.slot }}）</template>
       </div>
+      <!-- S1（03 §8.5）：功能位参考卡 —— 原型库 top-3，只作尺度参照；无命中整块隐藏 -->
+      <div v-if="archetypeCards.length" class="pv-archetype-box">
+        <div class="pv-archetype-title">功能位参考（来自套路库的原型）</div>
+        <div v-for="(a, i) in archetypeCards" :key="i" class="pv-archetype-card">
+          <div class="pv-archetype-text">{{ a.text }}</div>
+          <div class="pv-archetype-foot">
+            <span v-if="a.template" class="pv-archetype-src">出自：{{ a.template }}</span>
+            <el-button size="small" text type="primary" @click="useArchetypeDraft(a)">用作草稿</el-button>
+          </div>
+        </div>
+        <div class="pv-archetype-guard">只参考功能位与性格强度，具体设定请本书自创</div>
+      </div>
       <el-form label-width="90px">
         <el-form-item label="角色类型">
           <el-input v-model="confirmForm.role_type" placeholder="配角 / 反派 / 引路人…（默认配角）" />
@@ -542,6 +554,7 @@ const confirming = ref(false)
 const genVisible = ref(false)
 const confirmCharVisible = ref(false)
 const confirmingRow = ref(null)
+const archetypeCards = ref([])   // S1：建卡弹窗的「功能位参考」卡（原型库 top-3）
 const droppedTips = ref([])
 
 const genForm = reactive({ hint: '', n_chapters: 8, force_free: false })
@@ -931,7 +944,9 @@ async function generateOne(i) {
 
 // 每章完成 → 该章对话线程留两条消息（用户拍板的留痕形式）：
 // user = 生成指令（之后在该章对话里接着说「把开头改悬念点」，上下文自然衔接）；
-// ai = 完成回执。失败只影响留痕，不影响已落库的正文。
+// ai = **本章正文全文**（2026-09-20 用户拍板：不再只发一句「已完成」回执——那句话对修改本章毫无用处，
+//      直接贴出正文，作者可以就地指着某段说「这段重写」）。
+//      失败只影响留痕，不影响已落库的正文。
 async function traceToThread(row, chapterId, words) {
   try {
     const title = row.beat || `第 ${row.no} 行`
@@ -943,11 +958,19 @@ async function traceToThread(row, chapterId, words) {
       },
       chapterId
     )
+    // 🔴 必须从后端拉**落库版**正文，不能用流式缓冲 batch.streamText：
+    //    后端落库前会跑 _dedup_trailing_repeats（防复读裁剪），落库文本与流式原文可能不一致
+    //    （04-B11 的「DB 与流式不一致」就是这类静默差异）。拉不到才退回回执文案。
+    let body = ''
+    try {
+      const ch = await chapterApi.get(novelId.value, chapterId)
+      body = (ch?.content || '').trim()
+    } catch { /* 拉正文失败 → 下面走回执兜底，不影响已落库正文 */ }
     await discussionAppend(
       novelId.value,
       {
         role: 'assistant',
-        content: `✅ 已完成《${title}》（约 ${words} 字），正文已存入本篇。直接在这里继续对话即可修改这一章。`,
+        content: body || `✅ 已完成《${title}》（约 ${words} 字），正文已存入本篇。直接在这里继续对话即可修改这一章。`,
         meta: { type: 'chapter_done', chapter_id: chapterId },
       },
       chapterId
@@ -1079,7 +1102,65 @@ function openConfirmChar(row) {
   confirmForm.personality = ''
   confirmForm.background = ''
   confirmForm.brief = ''
+  archetypeCards.value = []
   confirmCharVisible.value = true
+  // S1（03 §8.5）：拉「功能位参考」卡 + 用最匹配的原型**自动起草**四个框（作者可改）
+  if (novelId.value && articleId.value && row?.id) {
+    planApi.getCharArchetypes(novelId.value, articleId.value, row.id)
+      .then((r) => {
+        const items = r?.data?.archetypes ?? r?.archetypes ?? []
+        archetypeCards.value = Array.isArray(items) ? items : []
+        if (archetypeCards.value.length) fillFromArchetype(archetypeCards.value[0])
+      })
+      .catch(() => { archetypeCards.value = [] })
+  }
+}
+
+// —— S1 原型 → 表单草稿（性格由 12 维刻度生成中文描述；只填**空**框，不覆盖作者已写的） ——
+const _TRAIT_ZH = {
+  altruism: ['重情义', '自私'], honor: ['守信', '背信'], mercy: ['仁慈', '狠辣'],
+  resolve: ['坚毅', '易摧'], decisiveness: ['果决', '犹豫'], discipline: ['自律', '放纵'],
+  risk: ['敢冒险', '求稳'], rationality: ['理性', '冲动'], guile: ['有城府', '直率'],
+  idealism: ['理想主义', '务实'], warmth: ['热忱', '冷漠'], dominance: ['强势', '随和'],
+}
+
+function _personality_from_traits(traits) {
+  const parts = []
+  for (const [k, v] of Object.entries(traits || {})) {
+    const vv = Number(v) || 0
+    if (Math.abs(vv) < 4) continue                    // 0/±1 是顺势推断，不进描述
+    const pair = _TRAIT_ZH[k] || [k, k]
+    const word = vv > 0 ? pair[0] : pair[1]
+    parts.push((Math.abs(vv) >= 7 ? '极其' : '较为') + word)
+  }
+  return parts.slice(0, 5).join('、')
+}
+
+function fillFromArchetype(a) {
+  if (!a) return
+  const ref = a.ref || {}
+  const modeMap = { 助力: '配角', 见证: '配角', 阻碍: '反派', 对手: '反派' }
+  if (!confirmForm.role_type && (ref.mode || a.template)) {
+    confirmForm.role_type = modeMap[ref.mode] || '配角'
+  }
+  if (!confirmForm.personality && ref.traits) {
+    confirmForm.personality = _personality_from_traits(ref.traits) || ''
+  }
+  if (!confirmForm.background && (ref.ranks || []).length) {
+    confirmForm.background = `来历定位：${ref.ranks.join('/')}`
+  }
+  if (!confirmForm.brief) {
+    confirmForm.brief = (ref.desc || a.text || '').slice(0, 100)
+  }
+}
+
+// 「用作草稿」：用该卡**重填全部空框**（S1：已填的框不动，作者可改）
+function useArchetypeDraft(a) {
+  confirmForm.role_type = ''
+  confirmForm.personality = ''
+  confirmForm.background = ''
+  confirmForm.brief = ''
+  fillFromArchetype(a)
 }
 
 async function doConfirmChar() {
@@ -1192,6 +1273,23 @@ const pcStatusType = (s) => ({ pending: 'warning', confirmed: 'success', dismiss
 /* 生成 / 确认弹窗 */
 .pv-gen-tip { margin-left: 10px; color: #c0c4cc; font-size: 12px; }
 .pv-confirm-name { margin-bottom: 12px; color: #606266; }
+
+/* S1 功能位参考卡（03 §8.5） */
+.pv-archetype-box {
+  margin-bottom: 12px; padding: 10px;
+  background: #f5f7fa; border-radius: 6px;
+}
+.pv-archetype-title { font-size: 12px; color: #909399; margin-bottom: 8px; }
+.pv-archetype-card {
+  padding: 8px; margin-bottom: 6px;
+  background: #fff; border: 1px solid #e4e7ed; border-radius: 4px;
+}
+.pv-archetype-text { font-size: 12px; color: #303133; line-height: 1.5; }
+.pv-archetype-foot {
+  margin-top: 4px; display: flex; align-items: center; justify-content: space-between;
+}
+.pv-archetype-src { font-size: 11px; color: #c0c4cc; }
+.pv-archetype-guard { font-size: 11px; color: #c0c4cc; margin-top: 4px; }
 
 /* 批量生成面板 */
 .pv-batch-idle { color: #c0c4cc; font-size: 12px; }

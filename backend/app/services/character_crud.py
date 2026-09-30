@@ -3,6 +3,9 @@
 分作品隔离通过 project_id 实现：所有查询/写入均按 project_id 过滤。
 此处仅实现角色实体；技能/关系/势力等沿用 routers/database.py 的占位桩。
 """
+import logging
+
+logger = logging.getLogger(__name__)
 import uuid
 from datetime import datetime, timezone
 
@@ -69,6 +72,9 @@ def create_character(db: Session, project_id: str, data: CharacterCreate) -> Cha
     db.add(o)
     db.commit()
     db.refresh(o)
+    # S3（03 §8.7）：建卡 → v1 修订（approved，manual）—— 版本历史从第一笔就有
+    from app.services import character_revision_crud as _rev
+    _rev.on_character_created(db, o)
     return _to_schema(o)
 
 
@@ -91,6 +97,9 @@ def update_character(
     o.updated_at = _now()
     db.commit()
     db.refresh(o)
+    # S3（03 §8.7）：作者改卡 → 记一版（approved，manual）；与上版相同自动跳过
+    from app.services import character_revision_crud as _rev
+    _rev.on_character_updated(db, project_id, character_id)
     return _to_schema(o)
 
 
@@ -123,6 +132,17 @@ def delete_character(db: Session, project_id: str, character_id: str) -> bool:
         kept = [x for x in chars if str(x).strip() != name]
         if len(kept) != len(chars):
             mem.characters = kept
+
+    # 1.8) S3 修订历史级联清理（A5 教训：删角色不许留孤儿）
+    from app.services import character_revision_crud as _rev
+    _rev.delete_all_for_character(db, character_id)
+
+    # 1.9) A2：通用关系边清理
+    try:
+        from app.services import entity_relation_crud as _er
+        _er.remove_edges_of(db, character_id)
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
 
     # 2) 技能：owner_id 指向该角色
     db.query(SkillORM).filter_by(project_id=project_id, owner_id=character_id).delete(

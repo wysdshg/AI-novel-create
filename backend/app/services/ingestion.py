@@ -39,22 +39,36 @@ EXTRACT_SYSTEM = (
     '  "locations": ["本章出现的地点名"],\n'
     '  "plot_points": ["关键事件，3~5条，每条一句话"],\n'
     '  "foreshadow_actions": [{"action": "bury/hint/resolve", "desc": "涉及的伏笔"}],\n'
-    '  "new_entities": [{"kind": "character/faction/location", "name": "名称", '
-    '"brief": "一句话说明"}],\n'
+    '  "new_entities": [{"kind": "character/faction/location/item/skill", "name": "名称", '
+    '"brief": "一句话说明", "category": "（item/skill 才填）分类如 丹药/武器/拳法/剑术"}],\n'
     '  "relations": [{"subject": "角色A", "object": "角色B", "type": "A对B的称呼或关系词"}],\n'
+    '  "char_changes": [{"name": "角色名", "change": "本章体现的转变（一句话）", '
+    '"personality": "（可选）新的性格描述", "current_level": "（可选）新的境界/等级"}],\n'
     '  "next_directions": [{"title": "走向标题", "detail": "具体怎么写，两三句", '
     '"tension": "高/中/低"}]\n'
     '}\n'
     "next_directions 给 3 条，要求方向彼此不同（不要三条都是打一架），"
     "并且必须能从本章结尾自然接上。\n"
     "new_entities 只填本章新出现、且资料里没有的；没有就给空数组。\n"
+    "🔴 抓人优先（S2③，治「第一篇没角色」）：凡本章**新出场、有名字、有戏份**的角色——"
+    "有名有姓、有行动或对话——必须**逐个**抽进 new_entities（kind=character，brief 写清"
+    "身份与本章作用），**宁可多抽不可漏抽**；只有没有名字的路人（无名侍卫/围观群众）才不抽，"
+    "道具/功法/概念不是角色，不要混进来。已经出过场的角色不要重复抽。\n"
     "relations 只写本章有互动的两人，subject 和 object 必须出自 characters 数组，"
-    "type 用其中一人对另一人的称呼或关系词（如师父/结拜/宿敌），每个字都简短。"
+    "type 用其中一人对另一人的称呼或关系词（如师父/结拜/宿敌），每个字都简短。\n"
+    "🔴 char_changes（B18×S3，2026-09-17）：只记**本章有明确文本体现**的角色变化"
+    "（境界突破、心态转变、立场变化、伤势/身份变化…），一句话说清；"
+    "name 必须是本书真实角色名；**没体现就不写、没有就给空数组**。"
+    "这些变化只会成为**待作者确认的修订**（不会自动改角色卡），所以值得记全。\n"
+    "🔴 new_entities 分级（docs/09 M8）：name 必填；kind 只能是 character/faction/location/item/skill；"
+    "item/skill 须给 category（丹药/武器/材料/拳法/剑术…自由词）；brief 一句话（会标 ai_generated，作者可改）。"
+    "物品/技能与已有条目同名就不要再报（不覆盖已有描述）。"
 )
 
 _JSON_KEYS = (
     "summary", "ending_hook", "characters", "locations",
     "plot_points", "foreshadow_actions", "new_entities", "relations", "next_directions",
+    "char_changes",
 )
 
 
@@ -65,39 +79,113 @@ _JSON_KEYS = (
 logger = logging.getLogger(__name__)
 
 
+def _close_brackets(body: str) -> str | None:
+    """按「括号栈」补全被截断的 JSON 结尾（字符串内部的括号不计）。
+
+    - 已平衡 → 原样返回；
+    - 只是少了结尾（`[`/`{` 未闭合）→ 追加对应闭合符；
+    - **截断在字符串中间**或括号错位（`]`/`}` 交错、多余）→ 返回 None，
+      交给调用方的其它候选（如"回退到上一个逗号"）处理，避免补出一个假 JSON。
+    """
+    stack: list[str] = []
+    in_str = esc = False
+    for ch in body:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack and ((ch == "}") == (stack[-1] == "{")):
+                stack.pop()
+            else:
+                return None            # 括号错位 → 不在本函数职责内
+    if in_str:
+        return None                    # 截断在字符串里 → 补引号会造出半句假摘要
+    if not stack:
+        return body
+    return body + "".join("}" if c == "{" else "]" for c in reversed(stack))
+
+
+def _repairs(body: str) -> list[str]:
+    """产出「截断修复」候选串，按**最可能先命中**的顺序排列（调用方逐个 json.loads 试探）。
+
+    实测高频形态（2026-09-16 试验，见 docs/08 B19）：
+      `{"chapters":[{…},{…}` + `}`  ← 最后一个 `}` 其实是**多余的**，缺的是数组的 `]`
+    这种"多一个尾 `}`"光靠补闭合是修不好的（补出来变成 `}}]}`），必须先去掉尾 `}` 再补。
+    """
+    out: list[str] = []
+    b = body.strip()
+    out.append(b)                      # ① 原样（合法 JSON 走这条，零成本）
+    out.append(b + "]}")               # ② 只缺数组+对象闭合
+    out.append(b + "]")                # ③ 只缺数组闭合（顶层是 list 的情形）
+    out.append(b + "}")
+    if b.endswith("}"):                # ④ 尾部多了 `}`（真实现象）→ 换成补 `]` 再收尾
+        out.append(b[:-1] + "]}")
+    s = b                              # ⑤ 截断在半途 → 回退到上一个逗号再补括号
+    for _ in range(4):
+        cut = s.rfind(",")
+        if cut <= 0:
+            break
+        s = s[:cut]
+        c = _close_brackets(s)
+        if c:
+            out.append(c)
+    c = _close_brackets(b)
+    if c:
+        out.append(c)
+    return out
+
+
 def parse_json_loose(text: str) -> dict | None:
     """从模型输出里把 JSON 抠出来。
 
-    实测本地小模型常见的四种脏输出：包在 ```json 里、前面带一句「好的」、
-    结尾多个逗号、以及中文全角引号。这里逐个处理，能救一个是一个。
+    实测本地小模型常见的五种脏输出：包在 ```json 里、前面带一句「好的」、
+    结尾多个逗号、中文全角引号，以及**输出被截断（括号未闭合）**。逐个处理，能救一个是一个。
+
+    🔴 **修复顺序有讲究（2026-09-16 重写，见 docs/08 B19）**：
+    1. 先试「原样」，再试「补/去括号」类修复；
+    2. **尾逗号**随后；
+    3. **全角引号 → 半角 放在最后**——它是破坏性的（会把正文里成对的全角引号也换掉），
+       旧实现在第 2 次尝试就做这件事，结果把"本来就只差个 `]`"的输出改得更坏。
+    实测收益：九星霸体诀 40 章摘要原本 4 批丢 3 批（20 条合法摘要被整批丢弃），加上截断修复后可直接救回。
     """
     if not text:
         return None
     s = text.strip()
-
-    # 去掉代码块围栏
     s = re.sub(r"^```(?:json)?\s*", "", s)
     s = re.sub(r"\s*```$", "", s)
 
-    # 取第一个 { 到最后一个 } 之间
-    i, j = s.find("{"), s.rfind("}")
-    if i == -1 or j == -1 or j <= i:
+    i = s.find("{")
+    if i == -1:
         return None
-    body = s[i:j + 1]
+    # 有末尾 `}` 时取到它（砍掉后面的说明文字）；同时保留"一直取到串尾"的候选，
+    # 供"整个输出被截断、最后一个 `}` 其实是多余"的情形使用。
+    j = s.rfind("}")
+    bodies = ([s[i:j + 1]] if j > i else []) + [s[i:]]
 
-    for attempt in range(3):
-        try:
-            data = json.loads(body)
-            return data if isinstance(data, dict) else None
-        except json.JSONDecodeError:
-            if attempt == 0:
-                # 尾逗号
-                body = re.sub(r",\s*([}\]])", r"\1", body)
-            elif attempt == 1:
-                # 全角引号 → 半角（只换成对出现的）
-                body = body.replace("“", '"').replace("”", '"')
-            else:
-                return None
+    tried: set[str] = set()
+    for body in bodies:
+        for text_fix in (lambda x: x,
+                         lambda x: re.sub(r",\s*([}\]])", r"\1", x),        # 尾逗号
+                         lambda x: x.replace("“", '"').replace("”", '"')):  # 全角引号（最后手段）
+            for cand in _repairs(text_fix(body)):
+                if cand in tried:
+                    continue
+                tried.add(cand)
+                try:
+                    data = json.loads(cand)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(data, dict):
+                    return data
     return None
 
 
@@ -133,16 +221,38 @@ def normalize_extract(data: dict) -> dict:
     out["foreshadow_actions"] = fa[:8]
 
     ne = []
+    _KINDS = {"character", "faction", "location", "item", "skill"}
     for item in _as_list(data.get("new_entities")):
         if isinstance(item, dict):
             name = str(item.get("name") or "").strip()
-            if name:
-                ne.append({
-                    "kind": str(item.get("kind") or "character").strip(),
-                    "name": name,
-                    "brief": str(item.get("brief") or "").strip(),
-                })
-    out["new_entities"] = ne[:10]
+            kind = str(item.get("kind") or "character").strip().lower()
+            if not name or kind not in _KINDS:
+                continue                       # M8 分级：kind 白名单外直接丢（防 AI 瞎造类别）
+            ne.append({
+                "kind": kind,
+                "name": name,
+                "brief": str(item.get("brief") or "").strip(),
+                "category": str(item.get("category") or "").strip() or None,
+            })
+    out["new_entities"] = ne[:12]
+
+    # B18×S3（2026-09-17）：章节里体现的角色**主观项变化** → 交给修订表走 pending 审批。
+    #  只保留 SNAPSHOT_FIELDS 里的键（personality/current_level 等），change 作 note。
+    cc = []
+    for it in _as_list(data.get("char_changes")):
+        if not isinstance(it, dict):
+            continue
+        nm = str(it.get("name") or "").strip()
+        if not nm:
+            continue
+        fields = {}
+        for k in ("personality", "background", "current_level", "talent", "brief", "role_type"):
+            v = str(it.get(k) or "").strip()
+            if v:
+                fields[k] = v
+        cc.append({"name": nm, "change": str(it.get("change") or "").strip(),
+                   "fields": fields})
+    out["char_changes"] = cc[:6]
 
     rel = []
     for item in _as_list(data.get("relations")):
@@ -319,7 +429,8 @@ def ingest_chapter(
         if skill_block:
             sys_parts.append(skill_block)
         # 超长正文截首尾，中间大段打斗描写对抽取贡献有限
-        clip = content if len(content) <= 8000 else content[:5000] + "\n…（中略）…\n" + content[-3000:]
+        clip = (content if len(content) <= 20000 else
+                content[:14000] + "\n…（中略）…\n" + content[-6000:])   # 2026-09-17 放开
         messages = [
             {"role": "system", "content": "\n\n".join(sys_parts)},
             {"role": "user", "content": f"第{chapter.chapter_no}章 {chapter.title or ''}\n\n{clip}"},
@@ -399,6 +510,7 @@ def ingest_chapter(
     # 幂等（重跑同一章不重复建），失败静默不阻断后续步骤。
     try:
         from app.services import faction_crud, relation_crud
+        from app.services import item_crud, skill_crud
         result["entity_sync"] = {
             "relations": relation_crud.sync_from_extract(
                 db, project_id, extracted.get("relations"),
@@ -407,9 +519,43 @@ def ingest_chapter(
             ),
             "factions": faction_crud.sync_from_extract(
                 db, project_id, extracted.get("new_entities")),
+            # A4（docs/09 M8）：新物品/新技能自动落库（标 ai_generated；重名不覆盖）
+            "items": item_crud.sync_from_extract(
+                db, project_id, extracted.get("new_entities")),
+            "skills": skill_crud.sync_from_extract(
+                db, project_id, extracted.get("new_entities")),
         }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[ingestion] 关系/势力回注失败: {type(e).__name__}: {e}")
+
+    # ---------- 2.8 角色主观项变化 → 待审修订（B18×S3，2026-09-17） ----------
+    # 抽到的 `char_changes` 只写 **pending** 修订（character_revisions），**绝不直接改角色卡**；
+    # 作者在角色详情页确认后才生效 —— 这正是 S3 的两档分工（客观项自动更新、主观项只提示）。
+    # 只处理「能解析到库内角色」的变化（库外角色由"新实体确认→建卡"链负责）；失败静默不阻断。
+    try:
+        from app.models.orm import CharacterORM as _Char
+        from app.services import character_revision_crud as _rev
+        _proposed, _skipped = [], []
+        for _ch in (extracted.get("char_changes") or []):
+            _nm = str(_ch.get("name") or "").strip()
+            _fields = _ch.get("fields") or {}
+            if not _nm or not _fields:
+                _skipped.append(_nm or "?")
+                continue
+            _row = db.query(_Char).filter_by(project_id=project_id, name=_nm).first()
+            if _row is None:
+                _skipped.append(_nm)      # 未建卡 → 走确认建卡链，不进修订表
+                continue
+            _r = _rev.propose(db, project_id, _row.id, _fields,
+                              chapter_no=chapter.chapter_no,
+                              note=f"第 {chapter.chapter_no} 章："
+                                   f"{_ch.get('change') or '角色有变化迹象'}")
+            if _r and _r.get("id"):
+                _proposed.append(_nm)
+        result["char_changes"] = {"proposed": _proposed, "skipped": _skipped}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ingestion] 角色变化待审修订写入失败（不影响摄取）: "
+                       f"{type(e).__name__}: {e}")
 
     # ---------- 3. 篇章摘要写进参考文档（追加，不覆盖） ----------
     if chapter.article_id:

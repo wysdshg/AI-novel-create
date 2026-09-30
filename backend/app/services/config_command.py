@@ -141,6 +141,40 @@ def _sanitize_characters(data: dict) -> None:
                 c.pop("age", None)
 
 
+def _archetype_hints(db: Session, text: str, top_k: int = 3) -> str:
+    """**角色立体化 S1**（2026-09-17 实现）：建卡时从角色原型库召回 top-k 原型注入 prompt。
+
+    原型库 = 已完成小说模板的 cast 槽位（`char_archetype` 三路索引之一），
+    每块形如「槽位｜位阶：…｜性格：利他+4·信义+7·…｜功能描述｜定位」。
+    给 AI 的是**参考**：功能定位 / 位阶组合 / 性格强度怎么落，**不是让它照抄某个具体角色**。
+
+    🔴 任何失败都返回 "" —— 原型库是增强项，**绝不能阻断建卡主流程**（与向量检索同款降级约定）。
+    """
+    try:
+        from app.services import vector_index
+        from app.services import plot_template_crud as tpl_crud
+        if not vector_index.enabled(db):
+            return ""
+        hits = vector_index.search_similar(
+            db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_ARCHETYPE, text, top_k=top_k)
+        lines = []
+        for h in hits[:top_k]:
+            t = str(getattr(h, "chunk_text", "") or (h.get("chunk_text") if isinstance(h, dict) else "") or "")
+            score = getattr(h, "score", None) or (h.get("score") if isinstance(h, dict) else None)
+            if t:
+                lines.append(f"  · {t}" + (f"（相似度 {score:.2f}）" if score else ""))
+        if not lines:
+            return ""
+        return ("\n\n【角色原型参考（来自已完成小说的套路库，仅供定位与性格粒度参考）】\n"
+                + "\n".join(lines)
+                + "\n要求：可参考其**功能定位、位阶组合、性格刻度强度**来补全角色字段；"
+                  "**不得照抄姓名 / 门派 / 具体身份**——本书已有设定优先，原型只是尺度参照。\n")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[config_command] 原型库召回失败（不影响建卡）: "
+                       f"{type(e).__name__}: {str(e)[:120]}")
+        return ""
+
+
 def run(db: Session, project_id: str, text: str, dry_run: bool = False,
         model_id: str | None = None, entity_type: str | None = None):
     # 模型选择统一走 model_crud.resolve_model（Phase 3.4）：指定且 active 才用，否则回退默认。
@@ -155,7 +189,7 @@ def run(db: Session, project_id: str, text: str, dry_run: bool = False,
         })
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": SYSTEM_PROMPT + _archetype_hints(db, text)},
         {"role": "user", "content": text},
     ]
     config = {

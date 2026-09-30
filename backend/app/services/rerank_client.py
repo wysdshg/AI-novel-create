@@ -12,13 +12,17 @@ rerank 用交叉编码器（query 与 doc 拼一起进模型）逐对打分，�
 - 失败一律抛 RerankError，调用方（vector_index.rerank）降级为保留 RRF 原序。
 """
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
 
 from app.services.embedding_client import get_api_key as _get_embed_key
 
+logger = logging.getLogger(__name__)
+
 BASE = "https://api.siliconflow.cn/v1"
+GATEWAY_BASE = "http://127.0.0.1:9377/v1"
 DEFAULT_MODEL = "BAAI/bge-reranker-v2-m3"
 _MAX_BATCH = 64
 # 单文档截断：reranker 输入越长越慢，块级文本 500 字已够；防御性留 2000
@@ -34,11 +38,30 @@ def get_api_key(db=None) -> str:
     return _get_embed_key(db)
 
 
+def _resolve_endpoint(db=None) -> tuple[str, str]:
+    """返回 (base, key)：网关模式走统一网关（/v1/rerank 已实测可用），否则硅基直连。
+
+    判定逻辑与 embedding_client._resolve_endpoint 同款（llm.use_gateway + llm.gateway_key，
+    缺 Key 回落直连并告警）。直连保持 env > app_configs > 模型配置表 三级查找不变。
+    """
+    if db is not None:
+        try:
+            from app.services import app_config
+            if app_config.get(db, "llm.use_gateway", False):
+                gk = str(app_config.get(db, "llm.gateway_key", "") or "").strip()
+                if gk:
+                    return GATEWAY_BASE, gk
+                logger.warning("[rerank_client] use_gateway=true 但未配 llm.gateway_key，回落硅基直连")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[rerank_client] 读取网关开关失败，按直连处理: {type(e).__name__}: {e}")
+    return BASE, get_api_key(db)
+
+
 def rerank_model_name() -> str:
     return (os.environ.get("NA_RERANK_MODEL") or DEFAULT_MODEL).strip()
 
 
-def _post_rerank(query: str, docs: list[str], api_key: str, top_n: int | None) -> list[dict]:
+def _post_rerank(base: str, query: str, docs: list[str], api_key: str, top_n: int | None) -> list[dict]:
     """单次请求（调用方保证 len(docs) ≤ _MAX_BATCH）。
 
     返回 [{"index": 原下标, "relevance_score": float}, ...]，已按分数降序。
@@ -51,7 +74,7 @@ def _post_rerank(query: str, docs: list[str], api_key: str, top_n: int | None) -
     if top_n is not None:
         payload["top_n"] = min(top_n, len(docs))
     req = urllib.request.Request(
-        f"{BASE}/rerank",
+        f"{base}/rerank",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
@@ -85,14 +108,17 @@ def rerank(query: str, docs: list[str], *, api_key: str | None = None, db=None,
     """
     if not docs:
         return []
-    key = (api_key or get_api_key(db) or "").strip()
+    if api_key:
+        base, key = BASE, api_key.strip()
+    else:
+        base, key = _resolve_endpoint(db)
     if not key:
-        raise RerankError("未配置硅基流动 API Key（rerank 与 embedding 共用）")
+        raise RerankError("未配置硅基流动 API Key（rerank 与 embedding 共用；网关模式需 llm.gateway_key）")
     merged: list[dict] = []
     for i in range(0, len(docs), _MAX_BATCH):
         batch = docs[i:i + _MAX_BATCH]
         # 分批时 top_n 按批内外分别截断会漏项，故仅单批时下传
-        part = _post_rerank(query, batch, key,
+        part = _post_rerank(base, query, batch, key,
                             top_n if len(docs) <= _MAX_BATCH else None)
         for it in part:
             it["index"] += i  # 还原全局下标

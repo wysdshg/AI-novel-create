@@ -24,6 +24,9 @@ export const plotTemplateApi = {
 
   create: (data) => http.post('/plot-templates', data),
 
+  /** B16 最小版（2026-09-17）：只改状态（draft|reviewed|archived），不动结构 —— 卡片快审用 */
+  review: (id, status) => http.post(`/plot-templates/${id}/review`, { status }),
+
   update: (id, data) => http.put(`/plot-templates/${id}`, data),
 
   remove: (id) => http.delete(`/plot-templates/${id}`),

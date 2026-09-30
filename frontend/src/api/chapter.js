@@ -10,6 +10,15 @@ export const chapterApi = {
   remove: (projectId, id) => http.delete(`/projects/${projectId}/chapters/${id}`),
 }
 
+// 段落写法打磨（2026-09-21）：勾选段落 → 一次请求打包 + 各自 top-5 参考 → 魔搭开思考。
+// 后台任务 + 轮询（E10：同步响应会被 vite 代理 300s 空闲上限掐掉）。
+export const polishApi = {
+  start: (projectId, chapterId, data) =>
+    http.post(`/projects/${projectId}/chapters/${chapterId}/polish`, data),
+  get: (projectId, chapterId, taskId) =>
+    http.get(`/projects/${projectId}/chapters/${chapterId}/polish/${taskId}`),
+}
+
 // 流式单章生成（SSE，§3.3）。用 fetch 读取事件流，回调 onEvent。
 // 支持传入 { signal: AbortSignal, modelId } 实现手动停止并指定模型；中止后抛 GenerationStopped 错误。
 export async function generateChapterStream(projectId, body, onEvent, { signal, modelId } = {}) {

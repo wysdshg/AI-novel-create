@@ -36,4 +36,9 @@ export const planApi = {
   // 确认建卡进角色库：{ role_type?, personality?, background?, talent?, current_level?, brief? }
   confirmPlannedChar: (projectId, articleId, pcId, data) =>
     http.post(`/projects/${projectId}/articles/${articleId}/planned-chars/${pcId}/confirm`, data),
+
+  // S1（03 §8.5）：建卡弹窗的「功能位参考」—— top-3 原型（slot_desc → slot 退化查询，
+  // 皆无则返回空数组，前端整块隐藏；检索失败后端也回空，不阻断建卡）
+  getCharArchetypes: (projectId, articleId, pcId) =>
+    http.get(`/projects/${projectId}/articles/${articleId}/planned-chars/${pcId}/archetypes`),
 }

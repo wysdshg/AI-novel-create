@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import ReferenceDocORM, SettingORM
+from app.models.orm import ReferenceDocORM, SettingORM, SettingTemplateORM
 from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary
 
 # 单次正文上限（字符），防止超大文档撑爆上下文；超过仅截断并标注。
@@ -348,11 +348,21 @@ def fetch_settings_by_ids(db: Session, ids: list[str]) -> list[tuple[str, str]]:
 
     返回 [(name, detail_text), ...]，按传入 id 顺序。detail 含层级阶梯 + 完整描述，
     供 LOAD_SETTING 语义：一次往返取回全部选中设定，注入上下文。
+
+    2026-09-26 起兼容设定模板（SettingTemplateORM，同一 UUID 空间）：
+    旧表未命中的 id 再查模板表，模板整篇 Markdown content 即详情。
     """
     if not ids:
         return []
     rows = db.query(SettingORM).filter(SettingORM.id.in_(ids)).all()
     by_id = {o.id: o for o in rows}
+    # 模板表兜底：旧表未命中的 id
+    missing = [i for i in ids if i not in by_id]
+    tpl_by_id: dict = {}
+    if missing:
+        trows = (db.query(SettingTemplateORM)
+                 .filter(SettingTemplateORM.id.in_(missing)).all())
+        tpl_by_id = {o.id: o for o in trows}
     out = []
     for i in ids:
         o = by_id.get(i)
@@ -364,6 +374,10 @@ def fetch_settings_by_ids(db: Session, ids: list[str]) -> list[tuple[str, str]]:
             if desc:
                 parts.append(desc)
             out.append((o.name, "\n".join(parts) + "\n"))
+            continue
+        t = tpl_by_id.get(i)
+        if t:
+            out.append((f"【设定模板：{t.name}】", (t.content or "").strip() + "\n"))
     return out
 
 

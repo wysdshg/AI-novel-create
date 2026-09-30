@@ -21,6 +21,29 @@ def _now():
     return datetime.utcnow()
 
 
+def find_existing_chapter(db: Session, project_id: str, article_id: str | None,
+                          chapter_no: int | None, title: str | None):
+    """**幂等生成保护**（2026-09-17，治"同名章生成两次"）：
+
+    批量/计划驱动生成时，前端可能带不上 `chapter_id` → 落库走"新建"分支 →
+    同一篇里出现两章同名（实测：废脉异变×2）。生成落库前先查：
+    ① 同篇同章号；② 同篇同标题。命中 → **覆盖那一章**而不是新建。
+    只在**同一篇内**查（跨篇同名是正常现象，比如两卷各有一章"夜谈"）。
+    """
+    q = db.query(ChapterORM).filter_by(project_id=project_id)
+    if article_id:
+        q = q.filter_by(article_id=article_id)
+    if chapter_no:
+        hit = q.filter_by(chapter_no=chapter_no).first()
+        if hit is not None:
+            return hit
+    if title and str(title).strip():
+        hit = q.filter_by(title=str(title).strip()).first()
+        if hit is not None:
+            return hit
+    return None
+
+
 def create_chapter(db: Session, project_id: str, data: ChapterCreate) -> ChapterORM:
     now = _now()
     o = ChapterORM(

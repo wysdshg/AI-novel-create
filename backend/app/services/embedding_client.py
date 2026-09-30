@@ -19,6 +19,7 @@ import urllib.request
 logger = logging.getLogger(__name__)
 
 BASE = "https://api.siliconflow.cn/v1"
+GATEWAY_BASE = "http://127.0.0.1:9377/v1"
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_DIM = 1024
 _MAX_BATCH = 16
@@ -27,6 +28,28 @@ _MAX_TEXT_CHARS = 2000
 
 class EmbeddingError(RuntimeError):
     """embedding 不可用（key 缺失 / 网络失败 / 响应异常）。调用方应降级而非中断。"""
+
+
+def _resolve_endpoint(db=None) -> tuple[str, str]:
+    """返回 (base, key)。
+
+    网关模式（app_configs `llm.use_gateway`=true 且已配 `llm.gateway_key`，2026-09-25）
+    走本地统一网关（`/v1/embeddings` 已实测可用，dim=1024 一致）；网关 Key 缺失回落
+    硅基直连并告警。直连保持原三级查找链（env > app_configs > 模型配置表）不变。
+    注意：走网关后 embedding 用量计入网关硅基渠道的 token 窗口（与概括共享
+    Key数×5万/min），网关按 Key 自动轮换。
+    """
+    if db is not None:
+        try:
+            from app.services import app_config
+            if app_config.get(db, "llm.use_gateway", False):
+                gk = str(app_config.get(db, "llm.gateway_key", "") or "").strip()
+                if gk:
+                    return GATEWAY_BASE, gk
+                logger.warning("[embedding_client] use_gateway=true 但未配 llm.gateway_key，回落硅基直连")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[embedding_client] 读取网关开关失败，按直连处理: {type(e).__name__}: {e}")
+    return BASE, get_api_key(db)
 
 
 def get_api_key(db=None) -> str:
@@ -66,7 +89,7 @@ def embed_model_name() -> str:
     return (os.environ.get("NA_EMBED_MODEL") or DEFAULT_MODEL).strip()
 
 
-def _post_embeddings(texts: list[str], api_key: str) -> list[list[float]]:
+def _post_embeddings(base: str, texts: list[str], api_key: str) -> list[list[float]]:
     """单次请求（调用方保证 batch ≤ _MAX_BATCH）。返回与 texts 等长的向量列表。"""
     payload = {
         "model": embed_model_name(),
@@ -74,7 +97,7 @@ def _post_embeddings(texts: list[str], api_key: str) -> list[list[float]]:
         "encoding_format": "float",
     }
     req = urllib.request.Request(
-        f"{BASE}/embeddings",
+        f"{base}/embeddings",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
@@ -103,13 +126,22 @@ def _post_embeddings(texts: list[str], api_key: str) -> list[list[float]]:
 
 
 def embed_texts(texts: list[str], *, api_key: str | None = None, db=None) -> list[list[float]]:
-    """批量向量化。自动分批（≤16 条/请求），顺序与输入一致。全部 L2 归一化。"""
+    """批量向量化。自动分批（≤16 条/请求），顺序与输入一致。全部 L2 归一化。
+
+    端点选择：显式传 `api_key` → 硅基直连（语义不变）；否则按 `_resolve_endpoint`
+    自动适配（网关模式走统一网关，一把 Key）。
+    """
     if not texts:
         return []
-    key = (api_key or get_api_key(db) or "").strip()
+    if api_key:
+        base, key = BASE, api_key.strip()
+    else:
+        base, key = _resolve_endpoint(db)
     if not key:
-        raise EmbeddingError("未配置硅基流动 API Key（env NA_SILICONFLOW_KEY 或 app_configs retrieval.siliconflow_key）")
+        raise EmbeddingError(
+            "未配置硅基流动 API Key（env NA_SILICONFLOW_KEY 或 app_configs retrieval.siliconflow_key；"
+            "网关模式需 app_configs llm.gateway_key）")
     out: list[list[float]] = []
     for i in range(0, len(texts), _MAX_BATCH):
-        out.extend(_post_embeddings([t for t in texts[i:i + _MAX_BATCH]], key))
+        out.extend(_post_embeddings(base, [t for t in texts[i:i + _MAX_BATCH]], key))
     return out

@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.schemas.chapter import GenerateRequest, ChapterCreate, ChapterUpdate
+from app.schemas.chapter import GenerateRequest, ChapterCreate, ChapterUpdate, PolishRequest
 from app.core.response import ok, sse_event
 from app.core.database import get_session
 from app.core import database as _db
@@ -269,7 +269,7 @@ def _maybe_load_refs(db, project_id, messages, ctx_meta, default, body) -> tuple
     """
     try:
         baseline_ids = {d.get("id") for d in ctx_meta.get("references", [])}
-        ids = _global_topup_ids(db, project_id, body.prompt_hint, baseline_ids, top_k=2)
+        ids = _global_topup_ids(db, project_id, body.prompt_hint, baseline_ids, top_k=5)  # 放开：2 → 5
         if not ids:
             return messages, ctx_meta
 
@@ -436,25 +436,20 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
     # resolve_model 已保证返回的一定是 active，故 use_model 等价于「有没有取到模型」。
     use_model = default is not None
 
-    # ---- 硬伤修复：章节生成长文任务，输出上限按目标字数换算，覆盖模型配置的 max_tokens ----
-    # 本地 qwen3.5:4b 配置 max_tokens=2048 → num_predict=2048，单章最多约 2600~3000 字就被硬截断，
-    # 永远写不满 word_range 目标。这里按目标字数换算成 token 上限（中文 1 字 ≈ 1.5 token，留余量），
-    # 并在 adapter.stream 调用处显式传入 max_tokens 覆盖配置（两个适配器都支持显式入参优先）。
-    # 上限 8192（约 5300 字）：云端推理模型开启思考后，reasoning token 也占 max_tokens 预算，
-    # 需留余量避免正文被截断；非思考场景模型会提前停止，不会真写到上限。可用环境变量覆盖。
+    # ---- 章节生成 token 上限：2026-09-20 用户拍板「彻底放开」，不再按目标字数换算 ----
+    #
+    # 【历史】早期按目标字数换算（中文 1 字 ≈ 1.5 token，×1.2+256），上限 8192（约 5300 字）。
+    # 【为什么废掉】开思考时 reasoning 与正文**共用同一个 max_tokens 预算**：
+    #   3000 字目标 → 3856 上限，思考先吃掉大半 → 正文只剩几百 token，永远写不满。
+    #   （2026-09-10 魔搭 GLM-5.3-Flash 已踩过同款：reasoning 吃 1300~2200，
+    #    ×1.2+256=3256 档正文被挤到逼近上限 → 末段无标点连排 411 字、字数不足 1464。）
+    # 【为什么安全】max_tokens 只是**上限**，实际按真实生成量计费，给满不多花钱；
+    #   非思考场景模型会提前 stop；_RepetitionGuard + gen.close() 兜底防失控拖时。
+    #   32768 档已在魔搭 GLM 系实测可行（finish=stop 正常）。可用 NA_CHAPTER_MAX_TOKENS 覆盖。
     _target_words = (body.word_range or {}).get("max", 5000) or 5000
-    _hard_cap = int(os.environ.get("NA_CHAPTER_MAX_TOKENS", "8192"))
-    # 2026-09-10（04-B13 续）：魔搭 GLM-5.3-Flash 的 reasoning 先吃 1300~2200 token
-    # 预算（实测三档探测），×1.2+256=3256 档正文被挤压到逼近上限 → 末段标点崩坏
-    # （无标点连排 411 字）+ 字数不足 1464。
-    # 用户拍板（2026-09-10）：GLM-5.3-Flash 按调用次数计费，token 不用省——
-    # 直接给满 32768（实测魔搭接受、finish=stop 正常；_RepetitionGuard + stream
-    # close 兜底防失控拖时）。其余模型（按 token 计费/本地）保持原公式。
-    _glm_family = "glm" in ((default.model_name if default else "") or "").lower()
-    if _glm_family:
-        chapter_max_tokens = 32768
-    else:
-        chapter_max_tokens = min(int(_target_words * 1.2) + 256, _hard_cap)
+    chapter_max_tokens = int(os.environ.get("NA_CHAPTER_MAX_TOKENS", "32768"))
+    # 按目标字数算出的理论值仅作日志留痕，便于事后对照「实际用了多少 / 是否逼近上限」
+    _tokens_by_words = int(_target_words * 1.2) + 256
 
     scan_enabled = bool(app_config.get(db, app_config.KEY_HUMANIZE_SCAN, True))
     ingest_enabled = bool(app_config.get(db, app_config.KEY_INGEST_ENABLED, True))
@@ -569,19 +564,59 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                 adapter = get_adapter(default.vendor, config)
                 guard = _RepetitionGuard()
                 loop_stopped = False
-                # 思考内容一律不接收、不透传：无论模型是否开 thinking，都只取 content 字段，
-                # reasoning_content 直接丢弃（避免 ModelScope Qwen3.5 等把英文分析塞进正文）。
-                # 思考开关仍发给模型（enable_thinking），让模型内部受益于思考；只是我们不再接收其思考输出。
-                gen = _content_only_stream(
-                    adapter.stream(
+                # 2026-09-20 前：思考内容一律不接收、不透传（只取 content，reasoning 直接丢弃）。
+                # 该策略是为了躲「厂商把 reasoning 塞进 content」的污染坑，但它同时让思考阶段
+                # 全程 0 字节 → 见下方双通道改造的【为什么改】。
+                # ⚠️ 不变的是：**reasoning 永远不进正文**（content_parts）。变的只是它现在会
+                # 以独立的 thinking 事件发给前端，用于保活与进度展示。
+                # ── 思考/正文双通道（2026-09-20 改）──────────────────────────────
+                # 【为什么改】旧链路在思考阶段把 reasoning 只 buffer 不 yield
+                # （openai_compat.stream 的 _reasoning_buffer），前端这段时间**一个字节都收不到**。
+                # Qwen3.8-Flash-Next 开思考首字实测 407s > vite 代理 300s 空闲上限
+                # → 连接被掐断 → 浏览器只看到 "network error"（真实原因被完全掩盖）。
+                #
+                # 【为什么安全 —— 回应历史上的 reasoning 污染坑】
+                # 旧坑是「厂商把 reasoning 塞进 content 字段」，正文因此混入英文推理词。
+                # 本改动**没有**把 reasoning 接回正文：thinking 帧走**独立事件**，
+                # 只做保活与进度展示，**永不 append 进 content_parts、永不落库**。
+                # 正文依旧只认 kind == "content" 的帧，与旧行为一致。
+                #
+                # 【节流】思考帧可能上千条，全量转发会打爆前端。累积到 40 帧或满 3 秒发一次，
+                # 3 秒的节奏足以让代理/浏览器认为连接活跃（vite 上限 300s）。
+                # 优先级：stream_dual（无 reasoning 兜底，最安全）> stream_with_thinking
+                # （ollama 版同样无兜底，可用）> stream（claude 等，无思考帧可透传）。
+                # 🔴 绝不能用 openai_compat 的 stream_with_thinking：它有 reasoning→正文兜底，
+                # 中文思考的模型一旦命中就把思考当正文落库（2026-09-09 老坑）。
+                _dual = getattr(adapter, "stream_dual", None) or getattr(adapter, "stream_with_thinking", None)
+                if _dual is not None:
+                    gen = _dual(
                         messages,
                         temperature=_temp,
                         enable_thinking=want_thinking,
                         max_tokens=chapter_max_tokens,
                     )
-                )
+                else:
+                    # claude 等未提供双通道的适配器：退回纯正文流（无思考帧可透传）
+                    gen = _content_only_stream(
+                        adapter.stream(
+                            messages,
+                            temperature=_temp,
+                            enable_thinking=want_thinking,
+                            max_tokens=chapter_max_tokens,
+                        )
+                    )
+                _think_buf: list[str] = []
+                _think_sent_at = time.time()
                 try:
-                    for _, delta in gen:
+                    for kind, delta in gen:
+                        # 🔴 reasoning 只推前端，绝不进正文、绝不落库
+                        if kind == "thinking":
+                            _think_buf.append(delta)
+                            if len(_think_buf) >= 40 or (time.time() - _think_sent_at) >= 3.0:
+                                yield sse_event("thinking", {"text": "".join(_think_buf)})
+                                _think_buf.clear()
+                                _think_sent_at = time.time()
+                            continue
                         if guard.feed(delta):
                             content_parts.append(delta)
                             yield sse_event("chunk", {"text": delta})
@@ -593,6 +628,10 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                             loop_stopped = True
                             logger.warning(f"[generate_chapter] ⚠️ 检测到重复循环，中断生成（已生成 {len(guard.full_text)} 字符）")
                             break
+                    # 流正常结束：把未凑满一批的思考余量发掉（纯展示/日志价值，不进正文）
+                    if _think_buf:
+                        yield sse_event("thinking", {"text": "".join(_think_buf)})
+                        _think_buf.clear()
                 finally:
                     # 无论正常结束 / 复读中断 / 客户端断开（GeneratorExit），都关闭上游生成器，
                     # 确保底层 HTTP 连接释放，模型不会继续空转计费。
@@ -678,17 +717,28 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                     ),
                 )
         else:
-            chapter = chapter_crud.create_chapter(
-                db,
-                project_id,
-                ChapterCreate(
-                    chapter_no=chapter_no,
-                    title=body.title or f"第{chapter_no}章",
-                    content=full,
-                    word_count=len(full),
-                    article_id=body.article_id,
-                ),
-            )
+            # 幂等保护（2026-09-17）：chapter_id 丢失（重开弹窗/重试/批量重跑）时，
+            # 同篇内已有**同章号或同标题**的章 → 覆盖那一章，不再新建（治"废脉异变×2"）。
+            _dup = chapter_crud.find_existing_chapter(
+                db, project_id, body.article_id, chapter_no, body.title)
+            if _dup is not None:
+                chapter = chapter_crud.update_chapter(
+                    db, project_id, _dup.id,
+                    ChapterUpdate(content=full, word_count=len(full),
+                                  **({"title": body.title} if body.title else {})),
+                )
+            else:
+                chapter = chapter_crud.create_chapter(
+                    db,
+                    project_id,
+                    ChapterCreate(
+                        chapter_no=chapter_no,
+                        title=body.title or f"第{chapter_no}章",
+                        content=full,
+                        word_count=len(full),
+                        article_id=body.article_id,
+                    ),
+                )
         yield sse_event("saved", {"chapter_id": chapter.id, "word_count": chapter.word_count})
 
         # ── Phase 4.1 最小 eval：把本次生成留档为一个「版本」 ──
@@ -836,6 +886,69 @@ def update_chapter(project_id: str, chapter_id: str, body: ChapterUpdate, db: Se
         feedback_crud.record_chapter_edit(db, project_id, chapter_id, before, o.content or "")
 
     return ok(_chapter_to_dict(o))
+
+
+# ---------------------------------------------------------------------------
+# 段落写法打磨（2026-09-21 作者拍板）：一次请求打包全部选中段 + 各自 top-5 参考。
+# 🔴 后台任务 + 轮询 —— E10 教训：魔搭开思考一轮 5~10 分钟，同步响应会被 vite 代理 300s 空闲上限掐掉。
+# 🔴 C1 铁律：后台线程用自己的 SessionLocal，不碰请求级 session。
+# ---------------------------------------------------------------------------
+_POLISH_TASKS: dict[str, dict] = {}
+
+
+@router.post("/projects/{project_id}/chapters/{chapter_id}/polish")
+def start_polish(project_id: str, chapter_id: str, body: PolishRequest,
+                 db: Session = Depends(get_session)):
+    o = chapter_crud.get_chapter(db, project_id, chapter_id)
+    if not o or not (o.content or "").strip():
+        raise HTTPException(404, "章节不存在或正文为空")
+
+    chapter_text = o.content or ""
+    task_id = uuid.uuid4().hex
+    _POLISH_TASKS[task_id] = {"status": "running", "result": None, "error": None,
+                              "chapter_id": chapter_id, "started_at": time.time()}
+
+    def _run():
+        db2 = _db.SessionLocal()
+        try:
+            from app.services import para_polish, embedding_client as ec
+            from app.services.plot_import import _ds_post, _ms_post, ds_key, ms_key
+            emb_key = ec.get_api_key(db2)
+
+            if body.provider == "ds":
+                def call_llm(p):
+                    return _ds_post(ds_key(db2), p, max_tokens=4000,
+                                    temperature=0.8, timeout=600)
+            else:
+                mt, tmo = (6000, 900) if body.thinking else (2000, 600)
+                def call_llm(p):
+                    return _ms_post(ms_key(db2), p, max_tokens=mt,
+                                    temperature=0.8, timeout=tmo, thinking=body.thinking)
+
+            result = para_polish.polish_paragraphs(
+                db2, chapter_text=chapter_text, para_ids=body.para_ids,
+                index_db=body.index_db, api_key=emb_key,
+                call_llm=call_llm, top_k=body.top_k)
+            result["provider"] = body.provider
+            result["thinking"] = body.thinking
+            _POLISH_TASKS[task_id].update(status="done", result=result)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[polish] 任务失败")
+            _POLISH_TASKS[task_id].update(status="error",
+                                          error=f"{type(e).__name__}: {str(e)[:300]}")
+        finally:
+            db2.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return ok({"task_id": task_id, "status": "running"})
+
+
+@router.get("/projects/{project_id}/chapters/{chapter_id}/polish/{task_id}")
+def get_polish(project_id: str, chapter_id: str, task_id: str):
+    t = _POLISH_TASKS.get(task_id)
+    if not t or t.get("chapter_id") != chapter_id:
+        raise HTTPException(404, "任务不存在")
+    return ok(t)
 
 
 @router.delete("/projects/{project_id}/chapters/{chapter_id}")

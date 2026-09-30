@@ -232,6 +232,59 @@
       @closed="onCharClosed"
     >
       <CharacterForm v-if="charForm" v-model="charForm" />
+
+      <!-- S3 修订历史（2026-09-17）：版本留痕 + AI 提案审批 + 一键回滚 -->
+      <div v-if="charEditingId" class="cr-rev">
+        <div class="cr-rev-head">
+          <span class="cr-rev-title">修订历史</span>
+          <el-tag v-if="pendingRevs.length" type="danger" size="small" effect="dark">
+            {{ pendingRevs.length }} 条待审
+          </el-tag>
+          <span class="cr-rev-spacer" />
+          <el-button size="small" text :loading="revLoading" @click="loadRevisions">刷新</el-button>
+        </div>
+
+        <el-empty
+          v-if="!revisions.length"
+          description="暂无修订（建卡 / 改卡 / 章节摄取都会自动留痕）"
+          :image-size="50"
+        />
+
+        <div
+          v-for="r in revisions"
+          :key="r.id"
+          class="cr-rev-item"
+          :class="{ 'is-pending': r.status === 'pending' }"
+        >
+          <div class="cr-rev-line">
+            <el-tag size="small" :type="revTagType(r)" effect="plain">{{ revLabel(r) }}</el-tag>
+            <span class="cr-rev-time">{{ fmtRevTime(r.created_at) }}</span>
+            <span v-if="r.chapter_no" class="cr-rev-ch">据第 {{ r.chapter_no }} 章</span>
+            <span class="cr-rev-spacer" />
+            <template v-if="r.status === 'pending'">
+              <el-button size="small" type="primary" text @click="approveRev(r)">采纳</el-button>
+              <el-button size="small" text @click="rejectRev(r)">驳回</el-button>
+            </template>
+            <el-button
+              v-if="r.status === 'approved'"
+              size="small" text
+              @click="rollbackRev(r)"
+            >回滚到此版</el-button>
+          </div>
+
+          <div v-if="r.note" class="cr-rev-note">{{ r.note }}</div>
+
+          <div v-if="diffEntries(r).length" class="cr-rev-diff">
+            <div v-for="d in diffEntries(r)" :key="d.k" class="cr-rev-diff-row">
+              <b>{{ fieldZh(d.k) }}</b>：
+              <span class="cr-rev-old">{{ d.from || '（空）' }}</span>
+              <span class="cr-rev-arrow">→</span>
+              <span class="cr-rev-new">{{ d.to || '（空）' }}</span>
+            </div>
+          </div>
+          <div v-else class="cr-rev-note cr-rev-same">（与当前卡无字段差异）</div>
+        </div>
+      </div>
       <template #footer>
         <el-button v-if="charEditingId" type="danger" plain @click="deleteCharacter">删除</el-button>
         <span class="cr-dialog-spacer" />
@@ -649,12 +702,95 @@ function openEditCharacter(n) {
   if (!c) return
   charForm.value = {
     name: c.name, role_type: c.role_type, age: c.age, gender: c.gender,
+    identity: c.identity, function: c.function,
     current_level: c.current_level, personality: c.personality, background: c.background,
     talent: c.talent, skills: c.skills ? [...c.skills] : [],
     relationship_network: c.relationship_network ? [...c.relationship_network] : [], brief: c.brief,
   }
   charEditingId.value = n.id
   charDialogVisible.value = true
+  loadRevisions()
+}
+
+// ---------------------------------------------------------------------------
+// S3 角色修订（2026-09-17）：历史留痕 / AI 提案审批 / 一键回滚
+// ---------------------------------------------------------------------------
+const revisions = ref([])
+const revLoading = ref(false)
+const pendingRevs = computed(() => revisions.value.filter((r) => r.status === 'pending'))
+
+const _FIELD_ZH = {
+  name: '姓名', role_type: '角色类型', gender: '性别', age: '年龄',
+  personality: '性格', background: '背景', talent: '天赋',
+  current_level: '等级/境界', skills: '技能', relationship_network: '关系网', brief: '简介',
+}
+function fieldZh(k) { return _FIELD_ZH[k] || k }
+
+function revLabel(r) {
+  const src = r.source === 'ai_extract' ? 'AI 提案' : r.source === 'rollback' ? '回滚' : '手动'
+  const st = r.status === 'pending' ? '（待审）' : r.status === 'rejected' ? '（已驳回）' : ''
+  return src + st
+}
+function revTagType(r) {
+  return r.status === 'pending' ? 'danger' : r.status === 'approved' ? 'success' : 'info'
+}
+function fmtRevTime(s) {
+  return (s || '').replace('T', ' ').slice(0, 16)
+}
+// 后端给的是 diff_vs_current: {字段: [当前值, 该版本值]}
+function diffEntries(r) {
+  const d = r.diff_vs_current || {}
+  return Object.entries(d).map(([k, v]) => ({ k, from: v?.[0], to: v?.[1] }))
+}
+
+async function loadRevisions() {
+  if (!projectId.value || !charEditingId.value) return
+  revLoading.value = true
+  try {
+    const r = await characterApi.listRevisions(projectId.value, charEditingId.value)
+    revisions.value = Array.isArray(r) ? r : (r?.items || [])
+  } catch (e) {
+    revisions.value = []
+  } finally {
+    revLoading.value = false
+  }
+}
+
+// 采纳/回滚都会改变角色卡 → 重新拉角色列表 + 回填表单
+async function _afterCardChanged(tip) {
+  ElMessage.success(tip)
+  await loadRevisions()
+  try {
+    const list = await characterApi.list(projectId.value)
+    characters.value = Array.isArray(list) ? list : (list?.items || [])
+    const fresh = characters.value.find((x) => x.id === charEditingId.value)
+    if (fresh) openEditCharacter(fresh)
+  } catch (e) { /* 列表刷新失败不影响审批结果 */ }
+}
+
+async function approveRev(r) {
+  try {
+    await characterApi.approveRevision(projectId.value, charEditingId.value, r.id)
+    await _afterCardChanged('已采纳该修订，角色卡已更新')
+  } catch (e) { /* 拦截器已提示 */ }
+}
+async function rejectRev(r) {
+  try {
+    await characterApi.rejectRevision(projectId.value, charEditingId.value, r.id)
+    ElMessage.info('已驳回（角色卡未变）')
+    loadRevisions()
+  } catch (e) { /* 拦截器已提示 */ }
+}
+async function rollbackRev(r) {
+  try {
+    await ElMessageBox.confirm(
+      `回滚到「${fmtRevTime(r.created_at)}」的版本？当前设定会被覆盖（回滚本身也会留痕）。`,
+      '回滚确认', { type: 'warning' })
+  } catch { return }
+  try {
+    await characterApi.rollbackRevision(projectId.value, charEditingId.value, r.id)
+    await _afterCardChanged('已回滚到该版本')
+  } catch (e) { /* 拦截器已提示 */ }
 }
 async function saveCharacter() {
   if (!charForm.value?.name?.trim()) { ElMessage.warning('请填写角色姓名'); return }
@@ -849,4 +985,47 @@ watch(projectId, () => { selected.kind = null; selected.id = null; load() })
 .cr-ctx-item:hover { background: #f5f7fa; }
 .cr-ctx-item.danger { color: #f56c6c; }
 .cr-dialog-spacer { flex: 1; }
+
+/* S3 修订历史（2026-09-17） */
+.cr-rev {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.cr-rev-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.cr-rev-title { font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
+.cr-rev-spacer { flex: 1; }
+.cr-rev-item {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-blank);
+}
+.cr-rev-item.is-pending {
+  border-color: var(--el-color-danger-light-5);
+  background: var(--el-color-danger-light-9);
+}
+.cr-rev-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cr-rev-time { font-size: 12px; color: var(--el-text-color-secondary); }
+.cr-rev-ch { font-size: 12px; color: var(--el-color-primary); }
+.cr-rev-note { font-size: 12px; color: var(--el-text-color-regular); margin-top: 4px; }
+.cr-rev-same { color: var(--el-text-color-placeholder); }
+.cr-rev-diff { margin-top: 5px; }
+.cr-rev-diff-row { font-size: 12px; line-height: 1.7; color: var(--el-text-color-regular); }
+.cr-rev-old { color: var(--el-text-color-placeholder); text-decoration: line-through; }
+.cr-rev-arrow { margin: 0 4px; color: var(--el-text-color-placeholder); }
+.cr-rev-new { color: var(--el-color-primary); }
 </style>

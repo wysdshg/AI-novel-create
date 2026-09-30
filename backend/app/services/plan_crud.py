@@ -22,6 +22,7 @@ import copy
 import json
 import logging
 import uuid
+import re
 from datetime import datetime
 
 from sqlalchemy import or_
@@ -38,7 +39,8 @@ from app.services import plot_template_crud as tpl_crud
 logger = logging.getLogger(__name__)
 
 # 一篇新角色上限（docs/03 §7.3.5 约束②：LLM 没有成本感，不设限会一篇造五个）
-PLANNED_CHAR_LIMIT = 3
+PLANNED_CHAR_LIMIT = 8          # S2②（2026-09-17）：3 → 8（治"黑袍人"病——一篇常驻人口 3 → 6-8）
+PLANNED_CHAR_LIMIT_STAGE_CHANGE = 12   # S2②：舞台切换（换地图/进入新舞台）篇放宽到 12
 
 
 # ---------------------------------------------------------------------------
@@ -96,15 +98,24 @@ def _book_context(db: Session, project_id: str, article_id: str) -> dict:
 def _templates_for_plan(db: Session, hint: str) -> tuple[list[dict], list[str]]:
     """按口述检索模板（top-2）；检索不可用/无结果 → 空列表（自由规划）。"""
     try:
-        r = tpl_crud.search(db, query=hint or "", top_k=2)
+        r = tpl_crud.search(db, query=hint or "", top_k=4)   # 2026-09-17 放开：2 → 4（上下文不省）
         return r["items"], [t["id"] for t in r["items"]]
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 模板检索失败: {type(e).__name__}: {e}")
         return [], []
 
 
+def resident_quota(active_count: int) -> int:
+    """S4（03 §8.8）最简形态：常驻角色建议配额 —— **由活跃角色数推算，不手工配**。
+
+    N = 活跃角色数 + 2（留新人空间），夹在 [6, 12]。
+    这只是给规划 prompt 的一句**建议**（非硬性配额、非配置表——03 定稿：那会变成调参地狱）。
+    """
+    return max(6, min(12, int(active_count or 0) + 2))
+
+
 def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
-                 n_chapters: int) -> str:
+                 n_chapters: int, resident_quota: int | None = None) -> str:
     """构造规划 prompt。
 
     🔴 **模板注入瘦身（2026-09-13，成本优化）**：模板只送「骨架」——
@@ -134,7 +145,7 @@ def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
         f"卷概要：{ctx.get('volume_summary') or '（无）'}",
         f"本书角色（可召回）：{'、'.join(ctx.get('characters') or []) or '（暂无）'}",
         f"未回收伏笔：{'；'.join(ctx.get('foreshadows') or []) or '（无）'}",
-        f"最近正文结尾：…{(ctx.get('prev_arc') or '')[-400:]}",
+        f"最近正文结尾：…{(ctx.get('prev_arc') or '')[-3500:]}",
     ]
 
     return (
@@ -148,14 +159,31 @@ def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
         "不代表具体角色，**不要在你的计划中使用这些代称**。请把每个节拍实际需要的角色，"
         "映射到本书真实角色（从下方角色列表中选，如 主角→本书主角名），没有合适的就放 "
         "`new_chars` 标为新角色。计划的 `recall_chars`/`new_chars` 一律写**本书真实角色名**。\n\n"
-        f"作者口述（最高优先级，必须尊重）：{hint or '（未提供，参考模板与上下文设计）'}\n\n"
+        "👥 **新角色命名规则（S2①，治「黑袍人」病）**：\n"
+        "  · `new_chars` 里**必须写具体姓名**（2~4 字中文名，符合本书世界观，如 「柳青岩」）；\n"
+        "  · **严禁把代称当名字**：黑袍人 / 神秘人 / 路人甲 / 蒙面汉子 / 灰衣老者 一类一律不合格；\n"
+        "  · 🔓 例外——剧情**刻意隐藏身份**的角色：允许暂用代称，但**必须带「（待揭晓）」后缀**\n"
+        "    （如 \"黑袍人（待揭晓）\"），系统会标记待揭晓并在真名出现时归并；\n"
+        "  · 新角色要有戏份设计：首次出现的那一行必须给他具体的行动/对话，不许只挂名。\n\n"
+        "🗺 **舞台判断（S2②）**：请在输出里加一个 `\"stage_change\"` 字段（true/false）——\n"
+        "本篇是否**换了地图 / 进入全新舞台**（新宗门、新城市、新秘境、时间跳跃后的新阶段）。\n"
+        "为 true 时：新角色名额放宽到 12 个，且**第 1~2 章必须先完成主要新角色的登场铺设**"
+        "（先铺人，再写事——不许新角色在第 5 章才冒出来）。\n\n"
+        "⚖ **人口基线（提示性，不阻塞）**：召回角色数 + 新角色数 < 6 时，请在 `notes` 里"
+        "提醒作者「本篇可用角色偏少，建议补充新角色或召回旧角色」。\n\n"
+        + (f"👤 **常驻角色建议**：本篇建议常驻约 {resident_quota} 人"
+           "（按现有活跃角色数推算，**建议非硬性配额**）。\n"
+           "  · 常驻角色 **≠ 每章都必须出场**——没戏份的角色不要硬安排事件；\n"
+           "  · 不在常驻名单 **≠ 本篇不出现**——旧角色可通过他人回忆、他人提及自然引入。\n\n"
+           if resident_quota else "")
+        + f"作者口述（最高优先级，必须尊重）：{hint or '（未提供，参考模板与上下文设计）'}\n\n"
         f"【本书上下文】\n" + "\n".join(ctx_lines) +
         f"\n\n【候选模板（借鉴结构，不要照抄；与口述冲突时以口述为准）】\n{t_text}\n\n"
         "输出 JSON（不要 markdown 代码块、不要任何额外说明）：\n"
         '{"lines":[{"no":1,"beat":"节拍名（4~8字）","summary":"本章剧情要点（60~120字，'
         '说清冲突与结果）","new_chars":["可引新角色"],"recall_chars":["召回老角色"],'
         '"target_words":3000,"hook":"章尾钩子（15字内）","template_ref":"借鉴的模板节拍"}],'
-        '"notes":"给作者的整体说明（50字内）"}'
+        '"stage_change":false,"notes":"给作者的整体说明（50字内）"}'
     )
 
 
@@ -197,12 +225,19 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     templates, t_ids = ([], []) if force_free else _templates_for_plan(db, hint)
     origin = "template" if templates else "free"
 
-    raw = _ds_post(key, _plan_prompt(ctx, templates, hint, n_chapters),
+    # S4（03 §8.8 最简形态）：常驻角色建议配额 = 活跃角色数 + 2，夹 [6,12]（推算，不手工配）
+    chars_all = db.query(CharacterORM).filter_by(project_id=project_id).all()
+    active_count = sum(1 for c in chars_all if (c.status or "alive") == "alive")
+    quota = resident_quota(active_count)
+
+    raw = _ds_post(key, _plan_prompt(ctx, templates, hint, n_chapters, quota),
                    max_tokens=6000, on_usage=make_usage_cb("ds_plan"))
     data = parse_json_loose(raw) or {}
     lines = _valid_lines(data.get("lines"))
     if not lines:
         raise RuntimeError(f"计划生成失败：模型未输出有效行；raw 前 200 字: {raw[:200]!r}")
+    # S2②：舞台切换判断（换地图/新舞台 → 新角色名额放宽 + 前 2 章先铺人）
+    stage_change = bool(data.get("stage_change"))
 
     # 防幻觉闸门：召回角色必须在 characters 表里真实存在
     valid_names = {c.name for c in db.query(CharacterORM)
@@ -243,7 +278,8 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     if old is not None:
         old.template_ids = t_ids
         old.template_names = [t["name"] for t in templates]
-        old.plan = {"lines": lines, "notes": str(data.get("notes") or "")}
+        old.plan = {"lines": lines, "notes": str(data.get("notes") or ""),
+                    "stage_change": stage_change}
         old.origin = origin
         old.raw_ai = raw_ai
         old.status = "draft"
@@ -251,7 +287,7 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
         db.commit()
         db.refresh(old)
         return _finalize_plan(db, project_id, article_id, old, lines,
-                              unknown, templates, blocked_dead)
+                              unknown, templates, blocked_dead, stage_change)
 
     o = ArticlePlanORM(
         id=uuid.uuid4().hex,
@@ -259,7 +295,8 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
         article_id=article_id,
         template_ids=t_ids,
         template_names=[t["name"] for t in templates],
-        plan={"lines": lines, "notes": str(data.get("notes") or "")},
+        plan={"lines": lines, "notes": str(data.get("notes") or ""),
+              "stage_change": stage_change},
         origin=origin,
         raw_ai=raw_ai,
         status="draft",
@@ -270,30 +307,42 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     db.commit()
     db.refresh(o)
     return _finalize_plan(db, project_id, article_id, o, lines,
-                          unknown, templates, blocked_dead)
+                          unknown, templates, blocked_dead, stage_change)
 
 
 def _finalize_plan(db: Session, project_id: str, article_id: str,
                    plan: ArticlePlanORM, lines: list[dict],
                    unknown: list[str], templates: list[dict],
-                   blocked_dead: list[str]) -> dict:
+                   blocked_dead: list[str], stage_change: bool = False) -> dict:
     """落库后的三连增强（全部容错、绝不拖垮主业务）：
     向量选角（7.3③）→ 新角色落地（7.3.5）→ 篇间交接差集 + 回归材料预取（7.3.5）。
     carryover / reentry_materials 同时**存进 plan JSON**（拍板/前端读计划时可见）。
     """
     casting = _run_casting(db, project_id, article_id, lines)
-    planned = _run_planned_chars(db, plan, lines, casting.get("castings"))
+    planned = _run_planned_chars(db, plan, lines, casting.get("castings"),
+                                 stage_change=stage_change)
 
     cast_names = [c["character_name"] for c in (casting.get("castings") or [])
                   if c.get("character_name")]
     carry = carryover_check(db, project_id, article_id, lines, cast_names)
     reentry = _reentry_for_plan(db, project_id, casting.get("castings") or [])
 
-    if carry.get("carryover_names") or reentry:
+    # S2②：人口基线（**提示而非报错，不阻塞**）——召回 + 新 < 6 就在计划 JSON 里挂提示
+    population_hint = None
+    total_pop = len(cast_names) + len(planned.get("planned_chars") or [])
+    if total_pop < 6:
+        population_hint = (f"本篇可用角色偏少（选角 {len(cast_names)} + 新角色 "
+                           f"{len(planned.get('planned_chars') or [])} = {total_pop} < 6），"
+                           "建议补充新角色或召回旧角色")
+
+    if (carry.get("carryover_names") or reentry or population_hint):
         # ⚠️ 深拷贝断开共享引用（7.2 踩坑：new==old → UPDATE 被静默跳过）
+        old_plan = plan.plan or {}
         plan.plan = copy.deepcopy({
             "lines": lines,
-            "notes": (plan.plan or {}).get("notes") or "",
+            "notes": old_plan.get("notes") or "",
+            "stage_change": old_plan.get("stage_change") or False,
+            "population_hint": population_hint,
             "carryover": carry,
             "reentry_materials": reentry,
         })
@@ -302,6 +351,7 @@ def _finalize_plan(db: Session, project_id: str, article_id: str,
     return {"plan_id": plan.id, "lines": len(lines), "unknown_chars": unknown,
             "templates": [t["name"] for t in templates],
             "blocked_dead": blocked_dead, "carryover": carry,
+            "population_hint": population_hint,
             **casting, **planned}
 
 
@@ -352,11 +402,35 @@ def _run_casting(db: Session, project_id: str, article_id: str,
 # ---------------------------------------------------------------------------
 # 新角色引入链路 + 篇间交接（Phase 7.3.5 B 档，2026-09-13，全零 LLM 成本）
 # ---------------------------------------------------------------------------
+# S2① 代称黑词（2026-09-17）：这些"名字"是模型偷懒的代称，不是具体姓名。
+# 命中且未标「（待揭晓）」的 new_chars 直接剔除（后校验，防模型用敷衍名字绕过 prompt 约束）。
+_PLACEHOLDER_WORDS = (
+    "路人甲", "路人乙", "路人", "群众", "士兵", "侍卫", "弟子们",
+    "黑袍人", "神秘人", "蒙面人", "蒙面汉子", "灰衣人", "灰衣老者",
+    "黑衣人", "老者", "汉子", "中年人", "青年", "少女", "少年", "某人",
+)
+
+
+def _is_placeholder_name(name: str) -> bool:
+    """判定一个 new_char 名字是不是"敷衍代称"：命中黑词，或长度 <2，或含泛指后缀。"""
+    n = (name or "").strip()
+    if len(n) < 2:
+        return True
+    if any(w in n for w in _PLACEHOLDER_WORDS):
+        return True
+    return False
+
+
 def _run_planned_chars(db: Session, plan: ArticlePlanORM, lines: list[dict],
-                       castings: list[dict] | None = None) -> dict:
+                       castings: list[dict] | None = None,
+                       stage_change: bool = False) -> dict:
     """把计划里的 `new_chars` 落成 `plan_chars` 表的 **pending 引入单**。
 
-    - 限额 `PLANNED_CHAR_LIMIT`（≤3）：按**首次出现顺序**保留，超出的剔除并告警；
+    - 限额（S2②）：普通篇 ≤ `PLANNED_CHAR_LIMIT`(8)；**舞台切换篇 ≤ 12**
+      （按**首次出现顺序**保留，超出的剔除并告警）；
+    - **代称分流（S2①）**：带「（待揭晓）」后缀的名字 → `name_known=False` 落库
+      （允许代称，但标记待揭晓、真名出现时由写后摄取归并）；其余必须是具体姓名——
+      命中黑词（路人甲/黑袍人/神秘人…）且无待揭晓标记的 **直接剔除**（后校验，防模型绕过）；
     - `first_appearance` 自动填 = 首次出现的行为篇内章号（约束③的数据基础）；
     - 重生成/行编辑后重落时**只清 pending 行**：作者已确认（confirmed，角色已建卡）
       或已忽略（dismissed）的意志不因重算而蒸发，同名跳过；
@@ -367,15 +441,32 @@ def _run_planned_chars(db: Session, plan: ArticlePlanORM, lines: list[dict],
     out: dict = {"planned_chars": [], "new_chars_dropped": [],
                  "unmatched_slots": [], "planned_chars_reason": None}
     try:
-        # 1. 收集（按首次出现顺序，去重）
+        # 1. 收集（按首次出现顺序，去重）+ S2① 代称分流后校验
+        limit = (PLANNED_CHAR_LIMIT_STAGE_CHANGE if stage_change
+                 else PLANNED_CHAR_LIMIT)
         seen: dict[str, int] = {}
+        name_known: dict[str, bool] = {}
+        rejected: list[str] = []
         for ln in lines:
             for nm in (ln.get("new_chars") or []):
                 s = str(nm).strip()
-                if s and s not in seen:
-                    seen[s] = int(ln.get("no") or 0)
-        keep = dict(list(seen.items())[:PLANNED_CHAR_LIMIT])
-        out["new_chars_dropped"] = list(seen)[PLANNED_CHAR_LIMIT:]
+                if not s or s in seen:
+                    continue
+                pending_reveal = s.endswith("（待揭晓）") or s.endswith("(待揭晓)")
+                base = re.sub(r"[（(]待揭晓[)）]$", "", s).strip()
+                if _is_placeholder_name(base) and not pending_reveal:
+                    rejected.append(s)          # 黑词代称且没标待揭晓 → 剔除
+                    continue
+                seen[s] = int(ln.get("no") or 0)
+                name_known[s] = not pending_reveal
+        if rejected:
+            logger.warning(f"[plan] new_chars 命中代称黑名单且未标「待揭晓」（已剔除）: {rejected}")
+        keep = dict(list(seen.items())[:limit])
+        out["new_chars_dropped"] = list(seen)[limit:]
+        if out["new_chars_dropped"]:
+            logger.warning(f"[plan] 新角色超出限额 {limit}"
+                           f"（{'舞台切换篇' if stage_change else '普通篇'}），已剔除: "
+                           f"{out['new_chars_dropped']}")
 
         # 2. 旧行：pending 清掉重落；confirmed/dismissed 保留（同名跳过）
         kept_names: set[str] = set()
@@ -394,6 +485,7 @@ def _run_planned_chars(db: Session, plan: ArticlePlanORM, lines: list[dict],
                 project_id=plan.project_id,
                 article_id=plan.article_id,
                 name=name,
+                name_known=name_known.get(name, True),
                 first_appearance=no,
                 status="pending",
                 created_at=now,
@@ -426,6 +518,7 @@ def _planned_to_dict(o: PlannedCharORM) -> dict:
         "first_appearance": o.first_appearance,
         "status": o.status,
         "character_id": o.character_id,
+        "name_known": bool(getattr(o, "name_known", True)),
     }
 
 

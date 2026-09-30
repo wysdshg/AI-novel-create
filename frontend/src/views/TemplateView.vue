@@ -1,5 +1,10 @@
 <template>
   <div class="tpl-page">
+    <div class="gr-subnav">
+      <router-link :to="{ name: 'template' }" class="gr-tab on">情节模板库</router-link>
+      <router-link :to="{ name: 'global-ref', query: { tab: 'item' } }" class="gr-tab">物品库</router-link>
+      <router-link :to="{ name: 'global-ref', query: { tab: 'skill' } }" class="gr-tab">技能库</router-link>
+    </div>
     <div class="tp-head">
       <div>
         <h2 class="tp-title">情节模板库</h2>
@@ -43,8 +48,29 @@
         <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
       </el-select>
 
+      <el-select v-model="bookFilter" placeholder="来源书" clearable style="width: 140px">
+        <el-option v-for="b in allBooks" :key="b" :label="b" :value="b" />
+      </el-select>
+
       <el-button v-if="isSearchMode" @click="exitSearch">退出检索</el-button>
       <el-button :loading="loading" @click="loadList">刷新</el-button>
+    </div>
+
+    <!-- B16 批量审核（2026-09-17）：多选 + 批量改状态（过 draft 积压用） -->
+    <div v-if="shown.length" class="tp-batch">
+      <el-checkbox
+        :model-value="allVisibleSelected"
+        :indeterminate="selected.length > 0 && !allVisibleSelected"
+        @change="(v) => (v ? selectAllVisible() : (selected = []))"
+      >全选本页</el-checkbox>
+      <span class="tp-batch-n">已选 {{ selected.length }} / {{ shown.length }}</span>
+      <el-button size="small" type="primary" :disabled="!selected.length" @click="batchReview('reviewed')">
+        批量通过
+      </el-button>
+      <el-button size="small" :disabled="!selected.length" @click="batchReview('draft')">退回草稿</el-button>
+      <el-button size="small" type="info" plain :disabled="!selected.length" @click="batchReview('archived')">
+        归档
+      </el-button>
     </div>
 
     <el-alert
@@ -68,8 +94,14 @@
     />
 
     <div v-else class="tp-grid">
-      <div v-for="t in list" :key="t.id" class="tp-card" @click="openDetail(t)">
+      <div v-for="t in shown" :key="t.id" class="tp-card" @click="openDetail(t)">
         <div class="tp-card-head">
+          <el-checkbox
+            class="tp-card-check"
+            :model-value="selected.includes(t.id)"
+            @change="toggleSelect(t)"
+            @click.stop
+          />
           <span class="tp-name">{{ t.name }}</span>
           <el-tag :type="statusType(t.status)" size="small" effect="plain">
             {{ statusText(t.status) }}
@@ -102,11 +134,39 @@
           <span v-if="t.source_stats?.books" class="tp-arcs">（{{ t.source_stats.books }} 书）</span>
         </div>
 
+        <!-- B16 最小版（2026-09-17）：卡片快审 —— 批量过 draft 不用开抽屉 -->
+        <div class="tp-card-actions" @click.stop>
+          <el-button v-if="t.status !== 'reviewed'" size="small" text type="primary"
+                     @click="quickReview(t, 'reviewed')">通过</el-button>
+          <el-button v-if="t.status !== 'draft'" size="small" text
+                     @click="quickReview(t, 'draft')">退回草稿</el-button>
+          <el-button v-if="t.status !== 'archived'" size="small" text type="info"
+                     @click="quickReview(t, 'archived')">归档</el-button>
+        </div>
+
         <div v-if="t.matched_beats?.length" class="tp-matched">
           <div class="tp-matched-title">命中节拍</div>
           <div v-for="(b, i) in t.matched_beats.slice(0, 3)" :key="i" class="tp-matched-item">
             <b>{{ b.phase }} · {{ b.beat }}</b>
-            <span v-if="b.variants?.length" class="tp-matched-how">—— {{ b.variants[0].how }}</span>
+            <!-- 默认折叠：展开看该节拍各书的走法内容 -->
+            <el-collapse v-if="b.variants?.length" class="tp-var-collapse tp-var-collapse--sm">
+              <el-collapse-item
+                v-for="(v, vi) in b.variants.slice(0, 6)"
+                :key="vi"
+                :name="`m-${i}-${vi}`"
+              >
+                <template #title>
+                  <span class="tp-variant-src">{{ v.src }}</span>
+                  <span class="tp-variant-how">{{ v.how }}</span>
+                </template>
+                <div v-if="v.desc" class="tp-variant-desc">{{ v.desc }}</div>
+                <div v-if="v.tags?.length" class="tp-variant-tags">
+                  <el-tag v-for="tg in v.tags" :key="tg" size="small" effect="plain" type="info">
+                    {{ tg }}
+                  </el-tag>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
           </div>
         </div>
       </div>
@@ -149,10 +209,32 @@
           <div class="tp-phase-name">{{ ph.phase }}</div>
           <div v-for="(b, bi) in ph.beats || []" :key="bi" class="tp-beat">
             <div class="tp-beat-name">{{ b.beat }}</div>
-            <div v-for="(v, vi) in b.variants || []" :key="vi" class="tp-variant">
-              <span class="tp-variant-src">{{ v.src }}</span>
-              <span class="tp-variant-how">{{ v.how }}</span>
-            </div>
+            <!-- 2026-09-19：走法默认折叠（数量可能很多），点开看具体内容 + 标签 -->
+            <el-collapse v-if="b.variants?.length" class="tp-var-collapse">
+              <el-collapse-item
+                v-for="(v, vi) in b.variants"
+                :key="vi"
+                :name="`${pi}-${bi}-${vi}`"
+              >
+                <template #title>
+                  <span class="tp-variant-src">{{ v.src }}</span>
+                  <span class="tp-variant-how">{{ v.how }}</span>
+                </template>
+                <div v-if="v.desc" class="tp-variant-desc">{{ v.desc }}</div>
+                <div v-else class="tp-none">（该走法无内容概括）</div>
+                <div v-if="v.tags?.length" class="tp-variant-tags">
+                  <el-tag
+                    v-for="tg in v.tags"
+                    :key="tg"
+                    size="small"
+                    effect="plain"
+                    type="info"
+                  >
+                    {{ tg }}
+                  </el-tag>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
             <div v-if="!b.variants?.length" class="tp-none">（无走法记录）</div>
           </div>
         </div>
@@ -212,6 +294,56 @@ const searchMode = ref('')
 
 const drawer = ref(false)
 const detail = ref(null)
+
+// —— B16 批量审核（2026-09-17）：来源书筛选 + 多选 ——
+const bookFilter = ref('')
+const selected = ref([])          // 选中的模板 id（数组比 Set 更好触发响应）
+
+const allBooks = computed(() => {
+  const s = new Set()
+  for (const t of list.value) for (const b of t.source_stats?.book_names || []) s.add(b)
+  return [...s].sort()
+})
+
+// 展示集 = 列表（服务端已按 scale/status/tag 过滤）再按来源书**客户端**过滤
+const shown = computed(() =>
+  bookFilter.value
+    ? list.value.filter((t) => (t.source_stats?.book_names || []).includes(bookFilter.value))
+    : list.value)
+
+const allVisibleSelected = computed(() =>
+  shown.value.length > 0 && shown.value.every((t) => selected.value.includes(t.id)))
+
+function toggleSelect(t) {
+  selected.value = selected.value.includes(t.id)
+    ? selected.value.filter((x) => x !== t.id)
+    : [...selected.value, t.id]
+}
+function selectAllVisible() {
+  selected.value = shown.value.map((t) => t.id)
+}
+
+// 批量改状态：逐个调（后端是单条端点）；失败逐个记录，最后一次性提示
+async function batchReview(status) {
+  const ids = [...selected.value]
+  if (!ids.length) return
+  let ok = 0
+  const failed = []
+  for (const id of ids) {
+    try {
+      await plotTemplateApi.review(id, status)
+      const t = list.value.find((x) => x.id === id)
+      if (t) t.status = status
+      ok += 1
+    } catch (e) {
+      failed.push(id)
+    }
+  }
+  selected.value = []
+  ElMessage.success(`已批量更新 ${ok} 个模板 → ${statusText(status)}`
+    + (failed.length ? `；失败 ${failed.length} 个` : ''))
+  if (statusFilter.value) loadList()
+}
 
 // 题材标签从当前列表里现取（后端没有单独的 tag 字典端点；反正一次 list 就够）
 const allTags = computed(() => {
@@ -315,6 +447,18 @@ async function changeStatus(val) {
   }
 }
 
+// B16 最小版（2026-09-17）：卡片快审 —— 直接改状态，不开抽屉
+async function quickReview(t, status) {
+  try {
+    await plotTemplateApi.review(t.id, status)
+    t.status = status
+    ElMessage.success(`「${t.name}」→ ${statusText(status)}`)
+    if (statusFilter.value) loadList()
+  } catch (e) {
+    // 拦截器已提示
+  }
+}
+
 async function removeTemplate() {
   try {
     await ElMessageBox.confirm(
@@ -339,6 +483,13 @@ onMounted(loadList)
 </script>
 
 <style scoped>
+.gr-subnav { display: flex; gap: 4px; margin-bottom: 14px; }
+.gr-tab {
+  padding: 7px 18px; border: 1px solid #e3e6ea; border-bottom: none;
+  border-radius: 8px 8px 0 0; color: #6a737d; text-decoration: none;
+  background: #f0f2f5; font-size: 14px;
+}
+.gr-tab.on { background: #fff; color: #24292f; font-weight: 700; }
 .tpl-page {
   padding: 16px 20px;
 }
@@ -446,6 +597,31 @@ onMounted(loadList)
   color: var(--el-text-color-secondary);
   margin-top: 8px;
 }
+.tp-card-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 2px;
+  justify-content: flex-end;
+  border-top: 1px dashed var(--el-border-color-lighter);
+  padding-top: 4px;
+}
+.tp-batch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 4px;
+  padding: 6px 10px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+}
+.tp-batch-n {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-right: auto;
+}
+.tp-card-check {
+  margin-right: 6px;
+}
 .tp-arcs {
   color: var(--el-text-color-placeholder);
 }
@@ -510,6 +686,41 @@ onMounted(loadList)
   line-height: 1.7;
   color: var(--el-text-color-regular);
   padding-left: 10px;
+}
+/* 2026-09-19：走法折叠面板（默认收起；点开看具体内容 + 标签） */
+.tp-var-collapse {
+  border-top: none;
+  margin-left: 4px;
+}
+.tp-var-collapse--sm {
+  margin-top: -2px;
+}
+.tp-var-collapse :deep(.el-collapse-item__header) {
+  height: 26px;
+  line-height: 26px;
+  font-size: 12px;
+  border-bottom: none;
+  padding-left: 6px;
+}
+.tp-var-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+}
+.tp-var-collapse :deep(.el-collapse-item__content) {
+  padding: 2px 6px 6px 14px;
+  font-size: 12px;
+}
+.tp-variant-desc {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--el-text-color-regular);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tp-variant-tags {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 .tp-variant-src {
   display: inline-block;

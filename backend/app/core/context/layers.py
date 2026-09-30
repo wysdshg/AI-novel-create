@@ -20,7 +20,7 @@ from app.core.context.budget import (
 from app.models.orm import (
     ProjectORM, VolumeORM, ArticleORM, ChapterORM,
     CharacterORM, FactionORM, LocationORM, RelationORM, SkillORM,
-    ForeshadowORM, SettingORM, DiscussionMessageORM,
+    ForeshadowORM, SettingORM, SettingTemplateORM, DiscussionMessageORM,
     ChapterMemoryORM, StageSummaryORM, ArticlePlanORM,
 )
 
@@ -180,6 +180,25 @@ def layer_world(db: Session, project_id: str, volume_id: str | None = None,
 
     _safe(_settings)
 
+    # 设定模板（2026-09-26：按题材一套一套的单文档模板，同一 setting_ids 空间）
+    # 模板是整套大文档，不适合按条展开——常驻只报名号，详情走 LOAD_SETTING 按需取。
+    # setting_ids=None 表示全量模式（旧语义），此时全部模板都要报名号。
+    def _tpl_names():
+        tquery = db.query(SettingTemplateORM)
+        if _proj_setting_ids is not None:
+            if not _proj_setting_ids:
+                return
+            tquery = tquery.filter(SettingTemplateORM.id.in_(_proj_setting_ids))
+        trows = tquery.all()
+        if not trows:
+            return
+        names = "；".join(f"{t.name}（{t.genre or '通用'}，含境界/货币/体系/规则分节）"
+                          for t in trows)
+        lines.append(f"[设定模板] {names}"
+                     f" —— 需要某套模板完整内容时 LOAD_SETTING 该模板 id 获取全文")
+
+    _safe(_tpl_names)
+
     if not lines:
         return None
     return Block(
@@ -230,6 +249,16 @@ def build_setting_catalog(db: Session, project_id: str) -> str:
         for s in rows:
             line = f"- id={s.id} | [{s.category or '其它'}] {s.name}"
             lines.append(line)
+        # 设定模板（按题材整篇注入的对象）同样进目录；None=全量模式时全部列出
+        tquery = db.query(SettingTemplateORM)
+        if _proj_setting_ids is not None:
+            if _proj_setting_ids:
+                tquery = tquery.filter(SettingTemplateORM.id.in_(_proj_setting_ids))
+            else:
+                tquery = None
+        if tquery is not None:
+            for t in tquery.all():
+                lines.append(f"- id={t.id} | [设定模板] {t.name}（{t.genre or '通用'}）")
         lines.append("")
         return "\n".join(lines)
 

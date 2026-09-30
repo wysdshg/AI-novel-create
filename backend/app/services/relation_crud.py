@@ -4,12 +4,16 @@
 关系是有向边：subject_id -> object_id，携带 relation_type / strength / note。
 此前 routers/database.py 中 relations 端点是占位桩，这里落地真实持久化。
 """
+import logging
+
+logger = logging.getLogger(__name__)
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.orm import CharacterORM, RelationORM
+from app.services import entity_relation_crud as er  # A2 双写
 from app.schemas.database import Relation, RelationCreate, RelationUpdate
 
 
@@ -53,6 +57,14 @@ def create_relation(db: Session, project_id: str, data: RelationCreate) -> Relat
     db.add(o)
     db.commit()
     db.refresh(o)
+    # A2 双写：同步 entity_relations（失败不阻断）
+    try:
+        er.upsert_edge(db, project_id, o.subject_id, "character", o.object_id, "character",
+                       o.relation_type,
+                       meta={"strength": o.strength} if o.strength is not None else None,
+                       note=o.note)
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
     return _to_schema(o)
 
 
@@ -70,10 +82,21 @@ def update_relation(
     o = get_relation(db, project_id, relation_id)
     if o is None:
         return None
+    old = (o.subject_id, o.object_id, o.relation_type)
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(o, field, value)
     db.commit()
     db.refresh(o)
+    # A2 双写：端点或类型变了 → 删旧边、写新边
+    try:
+        if old != (o.subject_id, o.object_id, o.relation_type):
+            er.remove_edge(db, project_id, old[0], old[1], old[2])
+        er.upsert_edge(db, project_id, o.subject_id, "character", o.object_id, "character",
+                       o.relation_type,
+                       meta={"strength": o.strength} if o.strength is not None else None,
+                       note=o.note)
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
     return _to_schema(o)
 
 
@@ -81,8 +104,14 @@ def delete_relation(db: Session, project_id: str, relation_id: str) -> bool:
     o = get_relation(db, project_id, relation_id)
     if o is None:
         return False
+    old = (o.subject_id, o.object_id, o.relation_type)
     db.delete(o)
     db.commit()
+    # A2 双写：同步删边
+    try:
+        er.remove_edge(db, project_id, old[0], old[1], old[2])
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
     return True
 
 
@@ -156,5 +185,11 @@ def sync_from_extract(
             relation_type=rtype, strength=50, note=note,
         ))
         db.flush()  # session autoflush=False：不 flush 则同批后续查重看不到刚加的行
+        # A2 双写（commit=False：嵌在摄取事务里，由调用方统一提交）
+        try:
+            er.upsert_edge(db, project_id, subj_id, "character", obj_id, "character",
+                           rtype, meta={"strength": 50}, note=note, commit=False)
+        except Exception as e:  # noqa: BLE001 - 双写失败不影响摄取主流程
+            logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
         stats["created"] += 1
     return stats

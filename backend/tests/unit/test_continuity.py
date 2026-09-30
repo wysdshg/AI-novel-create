@@ -111,34 +111,35 @@ class TestPlannedChars:
         assert db.query(PlannedCharORM).filter_by(plan_id=plan.id).count() == 2
 
     def test_limit_three_with_drop_report(self, proj):
-        """限额 ≤3：按首次出现顺序保留，超出剔除并告警（不硬塞）。"""
+        """限额（S2② 2026-09-17）：普通篇 ≤8，按首次出现顺序保留，超出剔除并告警。"""
         db, pid = proj
         plan = _mk_plan(db, pid)
-        r = pc._run_planned_chars(db, plan, _lines(
-            ["甲", "乙"], ["丙"], ["丁"], ["戊"]))
+        names10 = ["张三", "李四", "王五", "赵六", "钱七",
+                   "孙八", "周九", "吴十", "郑一", "陈二"]
+        r = pc._run_planned_chars(db, plan, _lines(names10[:5], names10[5:]))
         names = [o["name"] for o in r["planned_chars"]]
-        assert names == ["甲", "乙", "丙"], "只留首次出现的前 3 个"
-        assert r["new_chars_dropped"] == ["丁", "戊"]
+        assert names == names10[:8], "普通篇只留首次出现的前 8 个"
+        assert r["new_chars_dropped"] == names10[8:]
 
     def test_regen_keeps_confirmed_and_dismissed(self, proj):
         """重落只清 pending —— 作者已确认/已忽略的意志不因重算蒸发。"""
         db, pid = proj
         plan = _mk_plan(db, pid)
-        pc._run_planned_chars(db, plan, _lines(["甲", "乙", "丙"]))
+        pc._run_planned_chars(db, plan, _lines(["张三", "李四", "王五"]))
         rows = {o.name: o for o in
                 db.query(PlannedCharORM).filter_by(plan_id=plan.id).all()}
-        rows["甲"].status = "confirmed"
-        rows["甲"].character_id = "ch_x"
-        rows["乙"].status = "dismissed"
+        rows["张三"].status = "confirmed"
+        rows["张三"].character_id = "ch_x"
+        rows["李四"].status = "dismissed"
         db.commit()
-        # 重生成：丙消失、甲乙仍在计划里，还新增丁
-        r = pc._run_planned_chars(db, plan, _lines(["甲", "丁"], ["乙"]))
+        # 重生成：王五消失、张三李四仍在计划里，还新增赵六
+        r = pc._run_planned_chars(db, plan, _lines(["张三", "赵六"], ["李四"]))
         names = {o["name"]: o for o in r["planned_chars"]}
-        assert names["甲"]["status"] == "confirmed"
-        assert names["甲"]["character_id"] == "ch_x", "确认行原样保留"
-        assert names["乙"]["status"] == "dismissed"
-        assert names["丁"]["status"] == "pending"
-        assert "丙" not in names, "旧 pending 行已被清"
+        assert names["张三"]["status"] == "confirmed"
+        assert names["张三"]["character_id"] == "ch_x", "确认行原样保留"
+        assert names["李四"]["status"] == "dismissed"
+        assert names["赵六"]["status"] == "pending"
+        assert "王五" not in names, "旧 pending 行已被清"
         assert db.query(PlannedCharORM).filter_by(plan_id=plan.id).count() == 3
 
     def test_confirm_creates_character_and_links(self, proj):
@@ -219,9 +220,9 @@ class TestCarryover:
         db, pid = proj
         _mk_memory(db, pid, 10, characters=["王大锤", "刘二丫"], article_id="a2")
         _mk_memory(db, pid, 9, characters=["王大锤"], article_id="a2")
-        _mk_memory(db, pid, 8, characters=["路人甲"], article_id="a2")
+        _mk_memory(db, pid, 8, characters=["路人张三"], article_id="a2")
         r = pc.carryover_check(db, pid, "a1", _lines([]), [])
-        assert set(r["carryover_names"]) == {"王大锤", "刘二丫", "路人甲"}
+        assert set(r["carryover_names"]) == {"王大锤", "刘二丫", "路人张三"}
         assert r["last_chapters"] == [10, 9, 8]
 
     def test_referenced_not_flagged(self, proj):
@@ -339,7 +340,7 @@ class TestCascade:
         from app.services import article_crud
         db, pid = proj
         plan = _mk_plan(db, pid, "a1")
-        pc._run_planned_chars(db, plan, _lines(["甲", "乙"]))
+        pc._run_planned_chars(db, plan, _lines(["张三", "李四"]))
         assert db.query(PlannedCharORM).filter_by(article_id="a1").count() == 2
         article_crud.delete_article(db, pid, "a1")
         assert db.query(PlannedCharORM).filter_by(article_id="a1").count() == 0
@@ -349,7 +350,7 @@ class TestCascade:
         from app.services import volume_crud
         db, pid = proj
         plan = _mk_plan(db, pid, "a1")
-        pc._run_planned_chars(db, plan, _lines(["甲"]))
+        pc._run_planned_chars(db, plan, _lines(["张三"]))
         volume_crud.delete_volume(db, pid, "v1")
         assert db.query(PlannedCharORM).count() == 0
 
@@ -357,7 +358,7 @@ class TestCascade:
         from app.services import project_crud
         db, pid = proj
         plan = _mk_plan(db, pid, "a1")
-        pc._run_planned_chars(db, plan, _lines(["甲"]))
+        pc._run_planned_chars(db, plan, _lines(["张三"]))
         project_crud.delete_project(db, pid)
         assert db.query(PlannedCharORM).count() == 0
 
@@ -368,10 +369,10 @@ class TestCascade:
         plan = _mk_plan(db, pid)
         db.add(PlannedCharORM(id=uuid.uuid4().hex, plan_id=plan.id,
                               project_id=pid, article_id="a1",
-                              name="甲", first_appearance=1))
+                              name="张三", first_appearance=1))
         db.add(PlannedCharORM(id=uuid.uuid4().hex, plan_id=plan.id,
                               project_id=pid, article_id="a1",
-                              name="甲", first_appearance=2))
+                              name="张三", first_appearance=2))
         with pytest.raises(sa.exc.IntegrityError):
             db.commit()
         db.rollback()

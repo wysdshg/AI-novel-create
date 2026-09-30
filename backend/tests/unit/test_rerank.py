@@ -25,7 +25,8 @@ def _mk(db, pid, name, content):
 
 def test_rerank_parses_and_sorts(monkeypatch):
     """返回按 relevance_score 降序，index 正确。"""
-    def fake_post(query, docs, key, top_n):
+    def fake_post(base, query, docs, key, top_n):   # 2026-09-25 网关适配：base 前置
+        assert base in (rerank_client.BASE, rerank_client.GATEWAY_BASE)
         return [{"index": 2, "relevance_score": 0.9},
                 {"index": 0, "relevance_score": 0.1}]
     monkeypatch.setattr(rerank_client, "_post_rerank", fake_post)
@@ -50,7 +51,7 @@ def test_rerank_batches_restore_global_index(monkeypatch):
     monkeypatch.setattr(rerank_client, "_MAX_BATCH", 2)
     calls = []
 
-    def fake_post(query, docs, key, top_n):
+    def fake_post(base, query, docs, key, top_n):   # 2026-09-25 网关适配：base 前置
         calls.append(len(docs))
         return [{"index": i, "relevance_score": 1.0 - i * 0.1}
                 for i in range(len(docs))]
@@ -63,8 +64,8 @@ def test_rerank_batches_restore_global_index(monkeypatch):
 
 def test_rerank_top_n_truncates(monkeypatch):
     monkeypatch.setattr(rerank_client, "_post_rerank",
-                        lambda q, d, k, tn: [{"index": i, "relevance_score": 1.0 - i * 0.1}
-                                             for i in range(len(d))])
+                        lambda b, q, d, k, tn: [{"index": i, "relevance_score": 1.0 - i * 0.1}
+                                                for i in range(len(d))])
     out = rerank_client.rerank("q", ["a", "b", "c"], api_key="k", top_n=2)
     assert len(out) == 2
 

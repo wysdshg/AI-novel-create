@@ -18,10 +18,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+import logging
 
 from app.core.database import get_session
 from app.core.response import ok
 from app.services import plan_crud
+from app.services import vector_index
+from app.services import plot_template_crud as tpl_crud
+from app.models.orm import PlotTemplateORM
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["篇规划"])
 
@@ -48,6 +54,73 @@ class PlannedCharUpdateBody(BaseModel):
     slot_desc: str | None = None
     first_appearance: int | None = Field(None, ge=1)
     status: str | None = Field(None, description="pending|dismissed（confirmed 走 confirm 端点）")
+
+
+@router.get("/projects/{project_id}/articles/{article_id}/planned-chars/{pc_id}/archetypes",
+            summary="S1：建卡弹窗的「功能位参考」（top-3 原型 + 自动起草数据，03 §8.5）")
+def get_planned_char_archetypes(project_id: str, article_id: str, pc_id: str,
+                                db: Session = Depends(get_session)):
+    """建卡弹窗顶部的「功能位参考」卡片数据源。
+
+    查询串退化（2026-09-17 放宽）：`slot_desc` → `slot` → **首登场行剧情摘要+名字**
+    （未绑功能位的引入单也能拿到参考——这正是最常见的状态）→ 皆无才空。
+    每个命中带回**结构化槽位**（slot/mode/ranks/traits/desc）——前端用它自动起草四个框。
+    任何检索失败都返回空列表 —— 参考卡是增强项，**绝不阻断建卡**。
+    """
+    from app.models.orm import ArticlePlanORM
+    pc = (db.query(plan_crud.PlannedCharORM)
+          .filter_by(id=pc_id, project_id=project_id, article_id=article_id).first())
+    if pc is None:
+        raise HTTPException(404, "引入单不存在")
+
+    query = (pc.slot_desc or "").strip() or (pc.slot or "").strip()
+    if not query:
+        # 未绑功能位：用首登场行的剧情摘要当查询（比拿名字瞎搜有意义——那行写着他要干什么）
+        plan = db.query(ArticlePlanORM).filter_by(id=pc.plan_id).first()
+        row = None
+        if plan is not None:
+            for ln in ((plan.plan or {}).get("lines") or []):
+                if int(ln.get("no") or 0) == (pc.first_appearance or -1):
+                    row = ln
+                    break
+        if row and (row.get("summary") or "").strip():
+            query = f"{(pc.name or '').strip()}：{(row.get('summary') or '').strip()[:120]}"
+        elif (pc.name or "").strip():
+            query = pc.name.strip()
+        else:
+            return ok({"archetypes": [], "query": ""})
+
+    items: list[dict] = []
+    try:
+        hits = vector_index.search_similar(
+            db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_ARCHETYPE, query, top_k=3)
+        for h in hits:
+            text = getattr(h, "chunk_text", None) or (h.get("chunk_text") if isinstance(h, dict) else "")
+            score = getattr(h, "score", None) or (h.get("score") if isinstance(h, dict) else None)
+            src_id = getattr(h, "source_id", None) or (h.get("source_id") if isinstance(h, dict) else None)
+            if not text:
+                continue
+            trow = db.query(PlotTemplateORM).filter_by(id=src_id).first() if src_id else None
+            ref = None
+            if trow is not None:
+                # chunk_text == archetype_text(cate)（确定性）→ 反查结构化槽位
+                for c in tpl_crud.structure_casts(trow):
+                    if tpl_crud.archetype_text(c) == text:
+                        ref = {"slot": c.get("slot"),
+                               "desc": (c.get("desc") or "")[:60],
+                               "mode": c.get("mode"),
+                               "ranks": c.get("ranks") or [],
+                               "traits": c.get("traits") or {}}
+                        break
+            items.append({"text": text[:80],
+                          "score": round(float(score), 3) if score else None,
+                          "template": trow.name if trow else None,
+                          "template_id": src_id,
+                          "ref": ref})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plans] 原型参考检索失败（返回空，不阻断建卡）: "
+                       f"{type(e).__name__}: {str(e)[:120]}")
+    return ok({"archetypes": items, "query": query})
 
 
 class PlannedCharConfirmBody(BaseModel):

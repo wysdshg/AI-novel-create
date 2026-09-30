@@ -11,6 +11,10 @@
 //     超时/外部中止 + `GenerationStopped` 语义。
 
 /** 默认超时：与 axios timeout 一致（云端 LLM 常需 30~90s） */
+// ⚠️ 语义是「**空闲**超时」——距上一次收到数据的间隔，不是整条流的总时长。
+// 2026-09-20 修正：原实现按总时长计时，而 Qwen3.8-Flash-Next 开思考首字实测 407s，
+// 即便后端已在持续推送 thinking 保活帧，180s 一到仍会被误杀。改为空闲计时后，
+// 只要流还在动（哪怕只是思考帧）就不算超时，只有真·卡死才会触发。
 export const SSE_TIMEOUT_MS = 180000
 
 /**
@@ -63,12 +67,23 @@ export function createSseParser(onEvent, { tolerant = true } = {}) {
 
 /**
  * 创建带超时的 AbortController；超时自动 abort。
- * @returns {{controller: AbortController, cleanup: () => void}}
+ *
+ * 计时语义为**空闲超时**：`reset()` 会把计时器重新拨满，只要流还在推数据就不算超时。
+ *
+ * @returns {{controller: AbortController, reset: () => void, cleanup: () => void}}
  */
 export function createTimeoutController(ms = SSE_TIMEOUT_MS) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), ms)
-  return { controller, cleanup: () => clearTimeout(timer) }
+  let timer = setTimeout(() => controller.abort(), ms)
+  return {
+    controller,
+    /** 收到任意数据后调用：重新拨满空闲计时器 */
+    reset: () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => controller.abort(), ms)
+    },
+    cleanup: () => clearTimeout(timer),
+  }
 }
 
 /**
@@ -110,7 +125,7 @@ export async function readSseStream(resp, onEvent, {
     throw new Error(`${errorPrefix}未返回数据流`)
   }
 
-  const { controller, cleanup } = createTimeoutController(timeoutMs)
+  const { controller, reset, cleanup } = createTimeoutController(timeoutMs)
   // 外部 signal 与超时 controller 合并：任一触发即中止
   const onExternalAbort = () => controller.abort()
   if (signal) {
@@ -124,10 +139,25 @@ export async function readSseStream(resp, onEvent, {
   const decoder = new TextDecoder()
   const parser = createSseParser(onEvent, { tolerant })
 
+  // 🔴 2026-09-20 修复：此前 controller 造出来后**没有任何消费者**——
+  // 既没传给 fetch（fetch 用的是外部 signal），reader.read() 又不接受 signal，
+  // 于是定时器到点后 controller.abort() 什么也没发生，180s 超时保护形同虚设。
+  // 现在显式监听 abort → reader.cancel()，让挂起的 read() 立刻结束；
+  // 再用 timedOut 区分「超时」与「用户手动停止」，两者给出各自明确的错误文案。
+  let timedOut = false
+  const onTimeoutAbort = () => {
+    // 外部 signal 已中止 = 用户主动停止，不算超时
+    if (!signal || !signal.aborted) timedOut = true
+    reader.cancel().catch(() => { /* 已结束的流无需处理 */ })
+  }
+  controller.signal.addEventListener('abort', onTimeoutAbort, { once: true })
+
   try {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      // 收到数据 = 流还活着，把空闲计时器拨满（见 SSE_TIMEOUT_MS 的语义说明）
+      reset()
       parser.push(decoder.decode(value, { stream: true }))
     }
     parser.flush()
@@ -139,8 +169,14 @@ export async function readSseStream(resp, onEvent, {
     }
     throw e
   } finally {
+    controller.signal.removeEventListener('abort', onTimeoutAbort)
     if (signal) signal.removeEventListener('abort', onExternalAbort)
     cleanup()
+  }
+
+  // 超时判定放在 try/finally **之后**：放在 finally 里抛会掩盖内部的 GenerationStopped
+  if (timedOut) {
+    throw new Error(`${errorPrefix}超时（连续 ${Math.round(timeoutMs / 1000)} 秒未收到数据），请重试或换一个响应更快的模型`)
   }
 }
 

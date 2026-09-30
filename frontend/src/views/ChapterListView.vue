@@ -129,30 +129,101 @@
     </el-card>
 
     <!-- 正文查看 / 编辑（Phase 4.3 的前提：没有编辑入口，反馈就无从产生） -->
-    <el-drawer v-model="contentDrawer" size="640px" :title="contentTitle" destroy-on-close>
-      <div v-loading="contentLoading" class="ct-wrap">
-        <el-alert
-          v-if="contentChanged"
-          type="info"
-          :closable="false"
-          show-icon
-          title="已修改"
-          description="保存后系统会记下你改了哪些 —— 这些正是 AI 反复做不好的地方"
-          style="margin-bottom: 10px"
-        />
-        <el-input
-          v-model="contentDraft"
-          type="textarea"
-          :autosize="{ minRows: 18, maxRows: 30 }"
-          placeholder="该章还没有正文"
-        />
-        <div class="ct-foot">
-          <span class="ct-count">{{ (contentDraft || '').length }} 字</span>
-          <el-button size="small" @click="contentDrawer = false">取消</el-button>
-          <el-button size="small" type="primary" :disabled="!contentChanged" @click="saveContent">
-            保存
-          </el-button>
-        </div>
+    <el-drawer v-model="contentDrawer" size="640px" :title="contentTitle" destroy-on-close @closed="onDrawerClosed">
+      <div v-loading="contentLoading || polishLoading" class="ct-wrap">
+        <!-- ── AI 润色模式 ────────────────────────────── -->
+        <template v-if="polishStep === 'select'">
+          <el-alert
+            type="info" :closable="false" show-icon style="margin-bottom: 10px"
+            title="AI 润色：勾选要打磨的段落"
+            description="只优化选中的段落，其余原样保留；可全选。走魔搭开思考（选中全章约 10~20 分钟，选得少更快）。"
+          />
+          <div class="pl-bar">
+            <el-checkbox v-model="polishAllChecked" @change="onPolishAll">全选</el-checkbox>
+            <span class="pl-n">共 {{ polishParas.length }} 段 · 已选 {{ polishSelCount }} 段</span>
+            <el-button size="small" @click="polishStep = ''">退出润色</el-button>
+            <el-button size="small" type="primary" :disabled="!polishSelCount" @click="startPolish">
+              开始润色（{{ polishSelCount }} 段）
+            </el-button>
+          </div>
+          <div class="pl-list">
+            <div v-for="(p, i) in polishParas" :key="i" class="pl-item">
+              <el-checkbox v-model="p.checked" />
+              <span class="pl-idx">{{ i + 1 }}</span>
+              <span class="pl-len">{{ p.text.length }}字</span>
+              <span class="pl-text" :title="p.text">{{ p.text.slice(0, 60) }}</span>
+            </div>
+          </div>
+        </template>
+
+        <template v-else-if="polishStep === 'running'">
+          <el-alert
+            type="warning" :closable="false" show-icon style="margin-bottom: 10px"
+            title="魔搭开思考打磨中（一次请求，全章约 10~20 分钟）"
+            description="可以关掉抽屉去干别的，任务在后端不会中断；回来点「查看结果」。"
+          />
+          <div class="pl-bar">
+            <span class="pl-n">已等待 {{ Math.floor(polishWaited / 60) }} 分 {{ polishWaited % 60 }} 秒</span>
+            <el-button size="small" @click="polishStep = ''">先离开</el-button>
+            <el-button size="small" type="primary" @click="pollOnce">查看结果</el-button>
+          </div>
+        </template>
+
+        <template v-else-if="polishStep === 'review'">
+          <el-alert
+            type="success" :closable="false" show-icon style="margin-bottom: 10px"
+            :title="`打磨完成：${(polishResult.items || []).length} 段，已采纳 ${acceptedCount} 段`"
+            description="逐段对比。采纳会替换正文对应段落（已实时写入下方编辑器）；未采纳的保持原样。改完记得回编辑模式点「保存」。"
+          />
+          <div class="pl-bar">
+            <el-button size="small" type="primary" @click="acceptAll">全部采纳</el-button>
+            <el-button size="small" type="success" :disabled="!acceptedCount" @click="finishPolish">
+              完成（已应用 {{ acceptedCount }} 段）
+            </el-button>
+            <el-button size="small" @click="polishStep = 'select'">返回选段</el-button>
+          </div>
+          <div class="pl-list">
+            <div v-for="it in polishResult.items" :key="it.idx" class="pl-cmp">
+              <div class="pl-cmp-head">
+                <span class="pl-idx">{{ it.idx }}</span>
+                <span class="pl-meta">重合 {{ it.ov_self }} · 参考 {{ it.ov_ref_max }}</span>
+                <el-tag v-if="accepted[it.idx] === it.polished" size="small" type="success">已采纳</el-tag>
+                <el-tag v-else-if="accepted[it.idx] === it.original" size="small" type="info">保留原文</el-tag>
+                <el-button size="small" type="primary" plain @click="acceptOne(it)">采纳</el-button>
+                <el-button size="small" @click="keepOne(it)">保留原文</el-button>
+              </div>
+              <div class="pl-old">{{ it.original }}</div>
+              <div class="pl-new">{{ it.polished }}</div>
+            </div>
+          </div>
+        </template>
+
+        <!-- ── 编辑模式 ──────────────────────────────── -->
+        <template v-else>
+          <el-alert
+            v-if="contentChanged"
+            type="info"
+            :closable="false"
+            show-icon
+            title="已修改"
+            description="保存后系统会记下你改了哪些 —— 这些正是 AI 反复做不好的地方"
+            style="margin-bottom: 10px"
+          />
+          <el-input
+            v-model="contentDraft"
+            type="textarea"
+            :autosize="{ minRows: 18, maxRows: 30 }"
+            placeholder="该章还没有正文"
+          />
+          <div class="ct-foot">
+            <span class="ct-count">{{ (contentDraft || '').length }} 字</span>
+            <el-button size="small" :disabled="!contentDraft" @click="openPolish">AI 润色</el-button>
+            <el-button size="small" @click="contentDrawer = false">取消</el-button>
+            <el-button size="small" type="primary" :disabled="!contentChanged" @click="saveContent">
+              保存
+            </el-button>
+          </div>
+        </template>
       </div>
     </el-drawer>
   </div>
@@ -164,7 +235,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Collection, Notebook, Search, ArrowDown } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
-import { chapterApi } from '@/api/chapter'
+import { chapterApi, polishApi } from '@/api/chapter'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -331,6 +402,123 @@ async function saveContent() {
   }
 }
 
+// ── AI 润色（2026-09-21）：勾选段落 → 一次请求打包 → 魔搭开思考 → 对照采纳 ──
+// 拆段规则必须与后端 chapter_paras 完全一致（短行并入上一段），否则段号会错位。
+const polishStep = ref('')            // '' | select | running | review
+const polishLoading = ref(false)
+const polishParas = ref([])           // [{ text, checked }] —— 段号 = 下标 + 1（与后端一致）
+const polishTaskId = ref('')
+const polishWaited = ref(0)
+const polishResult = ref(null)
+const accepted = ref({})              // idx -> 采纳的文本
+let polishStartAt = 0
+let pollTimer = null
+
+const polishSelCount = computed(() => polishParas.value.filter((p) => p.checked).length)
+const polishAllChecked = computed({
+  get: () => polishParas.value.length > 0 && polishParas.value.every((p) => p.checked),
+  set: (v) => polishParas.value.forEach((p) => { p.checked = v }),
+})
+const acceptedCount = computed(() => Object.keys(accepted.value).length)
+
+function onPolishAll(v) {
+  polishParas.value.forEach((p) => { p.checked = v })
+}
+
+function splitParasLocal(text) {
+  const out = []
+  for (const line of text.split(/\r?\n/)) {
+    const s = line.trim()
+    if (!s) continue
+    if (s.length < 12 && out.length) { out[out.length - 1] += s; continue }
+    if (s.length < 12) continue
+    out.push(s)
+  }
+  return out
+}
+
+function openPolish() {
+  const paras = splitParasLocal(contentDraft.value || '')
+  if (!paras.length) { ElMessage.warning('本章没有可润色的正文'); return }
+  polishParas.value = paras.map((text) => ({ text, checked: true }))   // 默认全选
+  polishResult.value = null
+  accepted.value = {}
+  polishStep.value = 'select'
+}
+
+function onDrawerClosed() {
+  clearInterval(pollTimer)
+  if (polishStep.value === 'running') polishStep.value = ''   // 任务在后端不中断，重开可重试
+}
+
+function stopPoll() { clearInterval(pollTimer); pollTimer = null }
+
+async function startPolish() {
+  const ids = polishParas.value.map((p, i) => (p.checked ? i + 1 : 0)).filter(Boolean)
+  if (!ids.length) return
+  polishLoading.value = true
+  try {
+    const r = await polishApi.start(projectId.value, contentChapterId.value, {
+      para_ids: ids, provider: 'ms', thinking: true, top_k: 5,
+    })
+    polishTaskId.value = r.task_id
+    polishStartAt = Date.now()
+    polishWaited.value = 0
+    polishStep.value = 'running'
+    stopPoll()
+    pollTimer = setInterval(() => pollOnce(), 5000)
+  } catch (e) {
+    ElMessage.error('启动润色失败')
+  } finally {
+    polishLoading.value = false
+  }
+}
+
+async function pollOnce() {
+  try {
+    const s = await polishApi.get(projectId.value, contentChapterId.value, polishTaskId.value)
+    polishWaited.value = Math.floor((Date.now() - polishStartAt) / 1000)
+    if (s.status === 'done') {
+      stopPoll()
+      polishResult.value = s.result
+      accepted.value = {}
+      polishStep.value = 'review'
+    } else if (s.status === 'error') {
+      stopPoll()
+      ElMessage.error('润色失败：' + (s.error || '').slice(0, 140))
+      polishStep.value = 'select'
+    }
+  } catch (e) { /* 网络抖动忽略，下一轮再试 */ }
+}
+
+function applyAccepted() {
+  const paras = polishParas.value.map((p) => p.text)
+  for (const [k, v] of Object.entries(accepted.value)) {
+    const i = Number(k) - 1
+    paras[i] = v
+    if (polishParas.value[i]) polishParas.value[i].text = v
+  }
+  contentDraft.value = paras.join('\n\n')   // 每段一行、段间空行（与正文原格式一致）
+}
+
+function acceptOne(it) {
+  accepted.value[it.idx] = it.polished
+  applyAccepted()
+}
+function keepOne(it) {
+  accepted.value[it.idx] = it.original
+  applyAccepted()
+}
+function acceptAll() {
+  (polishResult.value.items || []).forEach((it) => { accepted.value[it.idx] = it.polished })
+  applyAccepted()
+}
+function finishPolish() {
+  applyAccepted()
+  polishStep.value = ''
+  ElMessage.success(`已应用 ${acceptedCount.value} 段修改 —— 记得点「保存」写回后端`)
+}
+
 async function rename(row) {
   try {
     const { value } = await ElMessageBox.prompt('新的章节标题', '重命名', {
@@ -440,6 +628,34 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
+/* ── AI 润色面板 ── */
+.pl-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 10px; flex-wrap: wrap;
+}
+.pl-n { font-size: 12px; color: #909399; margin-right: auto; }
+.pl-list {
+  max-height: 520px; overflow: auto;
+  border: 1px solid #ebeef5; border-radius: 6px;
+}
+.pl-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-bottom: 1px solid #f2f6fc;
+}
+.pl-idx { font-size: 12px; color: #409eff; min-width: 30px; font-weight: 600; }
+.pl-len { font-size: 11px; color: #c0c4cc; min-width: 46px; }
+.pl-text {
+  font-size: 13px; color: #606266; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pl-cmp { border: 1px solid #ebeef5; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.pl-cmp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.pl-meta { font-size: 11px; color: #909399; margin-right: auto; }
+.pl-old {
+  font-size: 12.5px; color: #909399; background: #f5f7fa;
+  border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; line-height: 1.8;
+}
+.pl-new { font-size: 13.5px; line-height: 1.9; }
 .cl { padding: 4px 16px 16px; }
 .cl-toolbar {
   display: flex; align-items: center; justify-content: space-between;

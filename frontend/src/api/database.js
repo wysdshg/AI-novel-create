@@ -12,10 +12,24 @@ function crud(prefix) {
   }
 }
 
-export const characterApi = crud('characters')
+export const characterApi = {
+  ...crud('characters'),
+  // —— S3 角色修订（2026-09-17）：版本历史 / AI 改动审批 / 回滚 ——
+  listRevisions: (projectId, cid) =>
+    http.get(`/projects/${projectId}/characters/${cid}/revisions`),
+  proposeRevision: (projectId, cid, data) =>
+    http.post(`/projects/${projectId}/characters/${cid}/revisions`, data),
+  approveRevision: (projectId, cid, rid) =>
+    http.post(`/projects/${projectId}/characters/${cid}/revisions/${rid}/approve`),
+  rejectRevision: (projectId, cid, rid) =>
+    http.post(`/projects/${projectId}/characters/${cid}/revisions/${rid}/reject`),
+  rollbackRevision: (projectId, cid, rid) =>
+    http.post(`/projects/${projectId}/characters/${cid}/revisions/${rid}/rollback`),
+}
 export const skillApi = crud('skills')
 export const relationApi = crud('relations')
 export const factionApi = crud('factions')
+export const itemApi = crud('items')   // 2026-09-21：A5 批次③（物品库，表在 A1 已建、AI 抽取已落库）
 export const locationApi = {
   ...crud('locations'),
   geoRelations: (projectId, id) => http.get(`/projects/${projectId}/locations/${id}/geo-relations`),

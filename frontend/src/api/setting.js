@@ -20,3 +20,12 @@ export const settingApi = {
   // 便捷方法：创建小说时挑选模板
   templates: () => http.get('/settings', { params: { template_only: true } }),
 }
+
+// 设定模板 API（2026-09-26：按题材一套一套的单文档模板）—— 后端 /api/v1/setting-templates
+export const settingTemplateApi = {
+  list: (params = {}) => http.get('/setting-templates', { params: buildSearch(params) }),
+  get: (id) => http.get(`/setting-templates/${id}`),
+  create: (data) => http.post('/setting-templates', data),
+  update: (id, data) => http.put(`/setting-templates/${id}`, data),
+  remove: (id) => http.delete(`/setting-templates/${id}`),
+}

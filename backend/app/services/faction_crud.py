@@ -2,12 +2,16 @@
 
 分作品隔离通过 project_id 实现：所有查询/写入均按 project_id 过滤。
 """
+import logging
+
+logger = logging.getLogger(__name__)
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.orm import FactionORM
+from app.services import entity_relation_crud as er  # A2 双写
 from app.schemas.database import Faction, FactionCreate, FactionUpdate
 
 
@@ -52,6 +56,11 @@ def create_faction(db: Session, project_id: str, data: FactionCreate) -> Faction
     db.add(o)
     db.commit()
     db.refresh(o)
+    # A2 双写：领袖 + 隶属边
+    try:
+        er.sync_faction_edges(db, o)
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
     return _to_schema(o)
 
 
@@ -109,6 +118,11 @@ def update_faction(
     o.updated_at = _now()
     db.commit()
     db.refresh(o)
+    # A2 双写：按当前 leader/members 重写领袖/隶属边
+    try:
+        er.sync_faction_edges(db, o)
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
     return _to_schema(o)
 
 
@@ -118,4 +132,9 @@ def delete_faction(db: Session, project_id: str, faction_id: str) -> bool:
         return False
     db.delete(o)
     db.commit()
+    # A2 双写：势力没了 → 清它的边
+    try:
+        er.remove_edges_of(db, faction_id)
+    except Exception as e:  # noqa: BLE001 - 双写失败不影响主流程
+        logger.warning(f"[dual-write] 同步 entity_relations 失败: {type(e).__name__}: {e}")
     return True

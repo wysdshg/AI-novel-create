@@ -72,3 +72,20 @@ class DiscussionChatRequest(BaseModel):
     temperature: Optional[float] = None
     conversation_id: Optional[str] = None
     model_id: Optional[str] = None  # 前端指定模型 ID；不传则 fallback 到默认模型
+
+
+class PolishRequest(BaseModel):
+    """段落写法打磨（2026-09-21）：一次请求打包全部选中段 + 各自 top-5 参考。
+
+    para_ids: 1-based 段号列表；None/空 = 全选。
+    provider: 优化用哪个模型（ms=魔搭 Qwen3.8-Flash-Next / ds=DeepSeek）。
+    thinking: 魔搭开思考（🔴 更慢约 8 倍，但措辞更稳；开思考时后端自动放大 max_tokens/timeout）。
+    index_db: 块向量库路径；不传用默认数据目录（C:\\Users\\w3013\\.ai_novel\\para_ref.db）。
+    """
+    model_config = {"protected_namespaces": ()}
+
+    para_ids: Optional[List[int]] = None
+    provider: str = "ms"
+    thinking: bool = True
+    index_db: Optional[str] = None
+    top_k: int = 5

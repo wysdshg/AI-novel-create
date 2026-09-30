@@ -39,11 +39,14 @@ from app.routers import (
     usage,
     feedback,
     # ——Phase 7.1 情节模板库 ——
-    plot_templates,
+    graph_rag,    plot_templates,
     # ——Phase 7.2 篇规划 ——
     plans,
     # ——Phase 7.3 角色选角 ——
     casting,
+    # ——E3 全局物品/技能库管理页 ——
+    global_ref,
+    setting_template,
 )# 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
 # logging 的「last resort」处理器（仅 WARNING+）静默丢掉。级别可用 NA_LOG_LEVEL 覆盖。
 setup_logging()
@@ -76,8 +79,11 @@ for r in (
     eval_router,                                      # Phase 4.1 最小 eval
     usage, feedback,                                  # Phase 4.2/4.3 观测消费端
     plot_templates,                                   # Phase 7.1 情节模板库
+    graph_rag,                                        # docs/09 §3：GraphRAG 注入装配（阶段 A3）
     plans,                                            # Phase 7.2 篇规划
     casting,                                          # Phase 7.3 角色选角
+    global_ref,                                       # E3 物品技能库管理
+    setting_template,                                 # 设定模板（按题材一套一套）
 ):
     app.include_router(r.router, prefix="/api/v1")
 

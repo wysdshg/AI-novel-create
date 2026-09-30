@@ -1,36 +1,5 @@
 <template>
   <el-form :model="form" label-width="80px" class="cf">
-    <!-- 人设模板（数据来自全局参考资料中文件名含「人设」的文档） -->
-    <el-form-item label="人设模板">
-      <div class="cf-tpl">
-        <el-select
-          v-model="tplFileId"
-          placeholder="选择模板文件（可选）"
-          :loading="tplLoading"
-          style="width:100%"
-          @change="onTplFileChange"
-        >
-          <el-option label="不使用模板" value="" />
-          <el-option v-for="f in tplFiles" :key="f.id" :label="f.filename" :value="f.id" />
-        </el-select>
-        <el-select
-          v-model="tplName"
-          placeholder="选择具体人设"
-          clearable
-          filterable
-          :disabled="!tplFileId || !tplList.length"
-          style="width:100%; margin-top:8px"
-          @change="onTplChange"
-        >
-          <el-option v-for="t in tplList" :key="t.title" :label="t.title" :value="t.title" />
-        </el-select>
-        <p v-if="tplError" class="cf-tpl-error">{{ tplError }}</p>
-        <p v-else-if="tplFileId && tplList.length && !tplName" class="cf-tpl-tip">
-          选择后将自动填充到下方空字段（不会覆盖已填写内容）
-        </p>
-      </div>
-    </el-form-item>
-
     <el-row :gutter="16">
       <el-col :span="12">
         <el-form-item label="姓名" required>
@@ -46,6 +15,18 @@
             />
           </div>
         </el-form-item>
+      <el-row :gutter="16">
+        <el-col :span="12">
+          <el-form-item label="身份地位">
+            <el-input v-model="form.identity" placeholder="如：青云宗内门长老 / 雷家嫡子" />
+          </el-form-item>
+        </el-col>
+        <el-col :span="12">
+          <el-form-item label="作用">
+            <el-input v-model="form.function" placeholder="如：主角的引路人 / 宿敌 / 工具人" />
+          </el-form-item>
+        </el-col>
+      </el-row>
       </el-col>
       <el-col :span="12">
         <el-form-item label="地位">
@@ -130,90 +111,11 @@
 </template>
 
 <script setup>
-import { defineModel, ref, onMounted } from 'vue'
+import { defineModel, ref } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
-import { parseCharacterTemplates, parseAgeMid } from '@/utils/templateParser'
 
 // 表单对象由父组件通过 v-model 传入，直接双向绑定
 const form = defineModel({ type: Object, required: true })
-
-// ============ 人设模板（来自全局参考资料「人设」类文档）============
-const tplFiles = ref([])        // 候选模板文件列表（全局参考文档中文件名含「人设」）
-const tplFileId = ref('')       // 选中的文件 id（''= 不使用模板）
-const tplList = ref([])         // 该文件解析出的模板数组
-const tplName = ref('')         // 选中的具体模板名
-const tplLoading = ref(false)
-const tplError = ref('')        // 参考文献无效的提示（不阻塞其它字段）
-
-async function _fetchGlobalDocs() {
-  const res = await fetch('/api/v1/references/global')
-  if (!res.ok) throw new Error('HTTP ' + res.status)
-  const json = await res.json()
-  const arr = json?.data || json
-  return Array.isArray(arr) ? arr : []
-}
-
-async function loadTplFiles() {
-  try {
-    const docs = await _fetchGlobalDocs()
-    // 文件名含「人设」的全局参考文档视为角色模板文件
-    tplFiles.value = docs.filter((d) => (d.filename || '').includes('人设'))
-  } catch {
-    tplFiles.value = []
-  }
-}
-
-async function onTplFileChange(fileId) {
-  tplName.value = ''
-  tplList.value = []
-  tplError.value = ''
-  if (!fileId) return
-  tplLoading.value = true
-  try {
-    const res = await fetch(`/api/v1/references/global/${fileId}`)
-    if (!res.ok) throw new Error('HTTP ' + res.status)
-    const json = await res.json()
-    const doc = json?.data || json
-    const text = doc?.content_text
-    if (!text || !text.trim()) {
-      tplError.value = '该模板文件内容为空，无法解析'
-      return
-    }
-    const list = parseCharacterTemplates(text)
-    if (!list.length) {
-      tplError.value = '该文件未解析出人设模板，请检查格式（需 ## 标题 + - 字段：值）'
-      return
-    }
-    tplList.value = list
-  } catch (e) {
-    tplError.value = '模板文件读取失败：' + (e?.message || '未知错误')
-  } finally {
-    tplLoading.value = false
-  }
-}
-
-function onTplChange(name) {
-  if (!name) return
-  const tpl = tplList.value.find((t) => t.title === name)
-  if (tpl) applyTemplate(tpl)
-}
-
-// 把模板字段回填到表单「空字段」（不覆盖已有内容）
-function applyTemplate(tpl) {
-  const f = form.value
-  const fields = tpl.fields || {}
-  const age = parseAgeMid(fields['年龄段'])
-  if (age != null && (f.age == null || f.age === '')) f.age = age
-  if (fields['性格'] && !f.personality) f.personality = fields['性格']
-  if (fields['经历'] && !f.background) f.background = fields['经历']
-  if (fields['能力'] && !f.talent) f.talent = fields['能力']
-  const briefParts = []
-  if (fields['社会地位']) briefParts.push('【社会地位】' + fields['社会地位'])
-  if (fields['其他补充']) briefParts.push(fields['其他补充'])
-  if (briefParts.length && !f.brief) f.brief = briefParts.join('\n')
-}
-
-onMounted(loadTplFiles)
 
 // —— 随机取名：从全局参考文档「取名素材」中随机拼名 ——
 const _nameCache = ref(null) // { surnames: string[], maleNames: string[], femaleNames: string[] }
@@ -286,7 +188,4 @@ async function randomName() {
 }
 .cf-name-row .el-input { flex: 1; }
 .cf-rand-btn { flex-shrink: 0; }
-.cf-tpl { width: 100%; }
-.cf-tpl-error { color: #f56c6c; font-size: 12px; margin: 6px 0 0; line-height: 1.4; }
-.cf-tpl-tip { color: #909399; font-size: 12px; margin: 6px 0 0; line-height: 1.4; }
 </style>

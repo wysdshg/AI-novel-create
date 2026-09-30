@@ -342,6 +342,77 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             logger.exception(f"[openai_compat.stream_with_thinking] 流式调用异常 model={self.config.get('model_name')!r}")
             yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
 
+    def stream_dual(self, messages, **params):
+        """流式返回「思考 / 正文」双通道，且**绝不做 reasoning→正文兜底**。
+
+        与 `stream_with_thinking` 的区别只有一处，但这一处是致命的：
+        后者在「流结束且 content 从未出现」时会把 reasoning_buffer 当正文输出
+        （仅用 15% 英文占比拦一道）。这条兜底对**中文思考**的模型完全放行——
+        Qwen3.8-Flash-Next 的思考是中文的，一旦命中就会把整段思考当成小说正文落库，
+        正是 2026-09-09 那次「输出里一直带着 reasoning」的老坑。
+
+        章节生成必须走本方法：thinking 帧仅用于前端保活/进度展示，
+        正文**只**认 content 帧；若模型最终没吐出任何 content，就什么都不 yield，
+        交给上层走「正文为空 → 拒绝落库」分支，而不是拿思考内容鱼目混珠。
+
+        yield ("thinking", 思考片段) 或 ("content", 正文片段)。
+        """
+        payload = self._payload(messages, **params)
+        payload["stream"] = True
+        base = (self.config.get("api_base", "") or "").rstrip("/")
+        url = f"{base}/chat/completions"
+        req = _build_request(url, payload, self.config.get("api_key", ""))
+        _content_seen = False
+        _reasoning_chars = 0
+        try:
+            with urllib.request.urlopen(req, timeout=240) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                        if obj.get("usage"):
+                            self.last_usage = self.normalize_usage(obj["usage"])
+                        choices = obj.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0]["delta"]
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                        piece = delta.get("content") or ""
+                        if reasoning:
+                            _reasoning_chars += len(reasoning)
+                            yield ("thinking", reasoning)
+                        if piece:
+                            _content_seen = True
+                            yield ("content", piece)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            f"[openai_compat.stream_dual] 跳过无法解析的 SSE 帧: "
+                            f"{type(e).__name__}: {e}; data={data[:200]!r}"
+                        )
+                        continue
+            # 🔴 关键差异：这里**不**做 reasoning 兜底。
+            # 只留痕，让上层按「正文为空」处理（拒绝落库），绝不拿思考内容冒充正文。
+            if not _content_seen and _reasoning_chars:
+                logger.warning(
+                    "[openai_compat.stream_dual] 模型全程未输出 content，仅产出 "
+                    f"{_reasoning_chars} 字思考内容 → 按正文为空处理（拒绝落库，不做兜底）。"
+                    f"model={self.config.get('model_name')!r}"
+                )
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "ignore")
+            yield ("content", f"\n[模型调用失败 status={e.code}: {detail[:200]}]")
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[openai_compat.stream_dual] 流式调用异常 model={self.config.get('model_name')!r}")
+            if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
+                yield ("content", "\n[模型响应超时（240 秒无数据）。多为模型端卡住或网络不稳，建议重试；也可先关闭思考模式。]")
+            else:
+                yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
+
     async def astream(self, messages, **params):
         for chunk in self.stream(messages, **params):
             yield chunk
