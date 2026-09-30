@@ -77,11 +77,11 @@ def get_engine():
             db_path.parent.mkdir(parents=True, exist_ok=True)
         # SQLite 在多线程（FastAPI）下需要关闭同线程检查
         connect_args = (
-            {"check_same_thread": False}
+            {"check_same_thread": False, "timeout": 30}  # timeout=多进程并发写的 busy_timeout（2026-09-18）
             if DEFAULT_DB_URL.startswith("sqlite")
             else {}
         )
-        _engine = create_engine(DEFAULT_DB_URL, future=True, connect_args=connect_args)
+        _engine = create_engine(DEFAULT_DB_URL, future=True, connect_args=connect_args)  # 多进程并发写：connect_args 含 timeout 30s（2026-09-18）
         SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
     return _engine
 

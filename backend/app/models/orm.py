@@ -4,7 +4,7 @@
 分作品隔离（§1）：所有业务实体含 project_id 字段。
 """
 from datetime import datetime
-from sqlalchemy import (
+from sqlalchemy import (UniqueConstraint, Index, Float,
     String, Integer, Text, Boolean, DateTime, Float, ForeignKey, JSON, UniqueConstraint
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -65,6 +65,9 @@ class CharacterORM(Base):
     # explicit 失踪/死亡的人回归**必须交代** —— 没有这个区分，"编回归理由"无从下手。
     disappear_mode: Mapped[str | None] = mapped_column(String(10), nullable=True)
     disappear_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # —— 数据模型大更新（2026-09-18，docs/09 §1.1）——
+    identity: Mapped[str | None] = mapped_column(String(60), nullable=True)   # 身份地位：青云宗内门长老
+    function: Mapped[str | None] = mapped_column(String(60), nullable=True)   # 作用：主角的引路人
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -80,6 +83,12 @@ class SkillORM(Base):
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     side_effect: Mapped[str | None] = mapped_column(Text, nullable=True)
     unlock_condition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # —— 数据模型大更新（2026-09-18，docs/09 §1.5：与角色解耦）——
+    skill_type: Mapped[str | None] = mapped_column(String(20), nullable=True)    # 拳法/剑术/幻术/遁术/炼体/炼丹术
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)             # 摘要（RAG 优先读取）
+    full_desc: Mapped[str | None] = mapped_column(Text, nullable=True)           # 效果/代价/外观/境界要求/进阶形态
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)        # True=AI 抽取生成（作者可改/可清，docs/09 M8 分级）
 
 
 class RelationORM(Base):
@@ -103,6 +112,14 @@ class FactionORM(Base):
     members: Mapped[list] = mapped_column(JSON, default=list)                # 核心成员（名称或角色ID）
     territory: Mapped[str | None] = mapped_column(String(200), nullable=True)  # 势力范围
     status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # —— 数据模型大更新（2026-09-18，docs/09 §1.2）——
+    faction_type: Mapped[str | None] = mapped_column(String(40), nullable=True)  # 自由词+候选：宗门/皇朝/公司/协会…
+    lv: Mapped[int | None] = mapped_column(Integer, nullable=True)               # 势力等级（标准见 lv_standards，按项目配置）
+    scale: Mapped[int | None] = mapped_column(Integer, nullable=True)            # 规模（人数，存整数不存"1000人"）
+    scale_as_of_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 规模对应的章号（战损/扩张会变）
+    stance: Mapped[str | None] = mapped_column(String(40), nullable=True)        # 立场：正道/魔道/中立/与主角敌对
+    parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # 上级势力
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)             # 摘要（RAG 优先读取）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -128,6 +145,15 @@ class LocationORM(Base):
     angle_span: Mapped[float | None] = mapped_column(Float, nullable=True)        # 扇形张角（度）
     height: Mapped[float | None] = mapped_column(Float, nullable=True)            # 高度/海拔（第三维）
     polygon: Mapped[list | None] = mapped_column(JSON, nullable=True)             # 不规则多边形顶点 [[x,y],...]
+    # —— 数据模型大更新（2026-09-18，docs/09 §1.3：父地点树 + 局部坐标）——
+    parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # 所属父地点（NULL=根位面）
+    pos_x: Mapped[float | None] = mapped_column(Float, nullable=True)            # 相对父地点的局部坐标（0~100 网格）
+    pos_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    size_value: Mapped[float | None] = mapped_column(Float, nullable=True)       # 自身尺度（数值+单位分开存）
+    size_unit: Mapped[str | None] = mapped_column(String(8), nullable=True)      # 里 / 亩 / 平方公里
+    importance: Mapped[str | None] = mapped_column(String(12), nullable=True)    # 重要/一般/次要（地图防标签爆炸）
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -316,6 +342,27 @@ class SettingORM(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list] = mapped_column(JSON, default=list)        # 检索用关键词
     is_template: Mapped[bool] = mapped_column(Boolean, default=False)  # 是否为可被选用的模板
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SettingTemplateORM(Base):
+    """设定模板（2026-09-26 拍板：设定库从「单条设定」改为「按题材一套一套」）。
+
+    一套模板 = 一个 Markdown 单文档，内含该题材的全部世界观：
+    境界 / 货币 / 体系（官制·军事·宗门…）/ 规则 / 物价等，分节组织。
+    新建小说时按题材挑选（如 玄幻小说设定 / 架空历史设定 / 都市高武设定），
+    模板 id 存入 ProjectORM.setting_ids（与旧 SettingORM.id 同一 UUID 空间，
+    注入端 fetch/catalog 先查旧表再查本表，向后兼容）。
+    旧 settings 表 23 条保留只读，不再供新建小说挑选。
+    """
+    __tablename__ = "setting_templates"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))              # 模板名，如「玄幻小说设定」
+    genre: Mapped[str] = mapped_column(String(40), default="通用", index=True)  # 适用题材
+    summary: Mapped[str | None] = mapped_column(String(500), nullable=True)     # 一句话说明（列表页展示）
+    content: Mapped[str] = mapped_column(Text)                  # 模板正文（Markdown 单文档）
+    tags: Mapped[list] = mapped_column(JSON, default=list)      # 检索关键词
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -754,6 +801,9 @@ class PlannedCharORM(Base):
     name: Mapped[str] = mapped_column(String(80))
     slot: Mapped[str | None] = mapped_column(String(60), nullable=True)       # 绑定的 cast 功能位（作者填）
     slot_desc: Mapped[str | None] = mapped_column(Text, nullable=True)        # 槽位功能说明（快照）
+    # S2①（2026-09-17）：代称分流 —— 刻意隐藏身份的角色允许代称，但必须「待揭晓」；
+    # name_known=False = 代称引入单（真名出现时由写后摄取按 aliases 归并），不许永久悬空。
+    name_known: Mapped[bool] = mapped_column(Boolean, default=True)
     first_appearance: Mapped[int] = mapped_column(Integer)                    # 篇内行号（必填，约束③）
     # pending=待作者确认 / confirmed=已建卡（character_id 回链）/ dismissed=作者忽略
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
@@ -786,4 +836,283 @@ class BookAliasORM(Base):
     relation: Mapped[str] = mapped_column(String(10), default="ally")  # ally|enemy|neutral
     role_desc: Mapped[str | None] = mapped_column(String(300), nullable=True)  # 槽位功能说明
     first_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # —— L2 角色画像（2026-09-16，**零调用聚合**，见 outputs/角色性格维度设计-草案.md）——
+    # 把「同一角色在多个模板里被 AI 打的 traits」按 (book_name, alias) 聚合为**一个**画像：
+    #   `traits`      = 逐维**中位数**（抗局部带偏；观测值都落在 9 档锚点上 → 中位仍是锚点，档位可比）
+    #   `traits_meta` = {"n": 观测次数, "spread": {维: 极差}, "templates": [模板名…], "skipped": [...]}
+    # ⚠️ 它是**归纳值**，性质不同于 `role_desc`（原书抽取）；`spread` 大 = 该维度观测不稳
+    #    （可能是**角色弧光**，也可能是噪声 —— 区分二者需要"弧序"，属 profile 的模型版能力）。
+    traits: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    traits_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class CharacterRevisionORM(Base):
+    """S3（03 §8.7，2026-09-17）：角色修订表 —— 角色从「静态卡片」变「有版本、可回溯的活体」。
+
+    三档来源（`source`）：`manual`=作者手动（建卡初版/改卡，直接 approved）；
+    `ai_extract`=摄取/建卡辅助提出的**主观项变化**（默认 pending，绝不直接覆盖角色卡）；
+    `rollback`=回滚动作本身也留痕（approved）。
+
+    两档分工（治漂移的核心）：客观项（出场章/互动关系/势力归属）**继续自动更新**、不进本表；
+    主观项（性格/信念/地位）只走 pending → 作者确认才生效。
+    """
+    __tablename__ = "character_revisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    character_id: Mapped[str] = mapped_column(String(36), index=True)
+    snapshot: Mapped[dict] = mapped_column(JSON)          # 角色卡全量快照（approve 时按它回写）
+    source: Mapped[str] = mapped_column(String(20))       # manual | ai_extract | rollback
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    chapter_no: Mapped[int | None] = mapped_column(Integer, nullable=True)   # 变化依据的章（摄取链填）
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)            # 「第 N 章显示 X 有转变迹象」
+    # 这次修订**打算改哪些字段**（2026-09-17 修 bug 加）：采纳时只应用这些字段，
+    # 否则旧快照会把后来批准的其它字段**擦回旧值**（实测：采纳「性格」条把刚批的「境界」擦空）。
+    changed_fields: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+# ===========================================================================
+# 数据模型大更新（2026-09-18，docs/09）：物品 / 通用关系 / 关系字典 / 等级标准
+# ===========================================================================
+class ItemORM(Base):
+    """物品库（09 §1.4）。谁持有、谁能用 → entity_relation，本表不存引用字段。"""
+    __tablename__ = "items"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    category: Mapped[str | None] = mapped_column(String(20), nullable=True)      # 丹药/武器/防具/材料/信物/功法（书）
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)             # RAG 优先读取
+    full_desc: Mapped[str | None] = mapped_column(Text, nullable=True)           # 效果/副作用/来历/品阶/限制（P1：写描述不设字段）
+    is_unique: Mapped[bool] = mapped_column(Boolean, default=False)              # 0 可多份 / 1 专属唯一
+    ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)        # True=AI 抽取生成（作者可改/可清，docs/09 M8 分级）
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)        # 完好/损毁/遗失/已消耗
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class EntityRelationORM(Base):
+    """通用关系（09 §2.1）：任意实体对（character/skill/item/faction/location）。
+
+    只存关联不存长文本；方向与逆关系见 relation_types 字典；对称关系只存一条。
+    """
+    __tablename__ = "entity_relations"
+    __table_args__ = (
+        UniqueConstraint("a_id", "b_id", "relation_type", name="uq_entity_relation"),
+        Index("ix_er_a", "a_id"),
+        Index("ix_er_b", "b_id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    a_id: Mapped[str] = mapped_column(String(36))
+    a_type: Mapped[str] = mapped_column(String(16))                              # character/skill/item/faction/location
+    b_id: Mapped[str] = mapped_column(String(36))
+    b_type: Mapped[str] = mapped_column(String(16))
+    relation_type: Mapped[str] = mapped_column(String(24))                       # 取自 relation_types.name
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)               # 键固定枚举：proficiency/quantity/holding/since_chapter
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class RelationTypeORM(Base):
+    """关系类型字典（09 §2.2）：方向 / 逆关系 / 注入权重 / 适用实体对。"""
+    __tablename__ = "relation_types"
+    name: Mapped[str] = mapped_column(String(24), primary_key=True)
+    symmetric: Mapped[bool] = mapped_column(Boolean, default=False)
+    inverse: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    weight: Mapped[int] = mapped_column(Integer, default=50)                     # 注入排序权重（越大越先）
+    applies_to: Mapped[list | None] = mapped_column(JSON, nullable=True)         # [["character","item"],…]
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class LvStandardORM(Base):
+    """项目级等级标准（09 §1.2）：如 force Lv2 = 势力最强者为筑基高手。"""
+    __tablename__ = "lv_standards"
+    __table_args__ = (UniqueConstraint("project_id", "kind", "lv", name="uq_lv_standard"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="force")               # force（未来可扩 character 等）
+    lv: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str | None] = mapped_column(String(40), nullable=True)         # 如「一方豪强」
+    desc: Mapped[str | None] = mapped_column(Text, nullable=True)                # 如「势力最强者为筑基高手」
+
+
+# ===========================================================================
+# 原子事件与骨架组装（2026-09-18，docs/10 §4）：取代「整体向量聚类模板」的三层架构
+# ---------------------------------------------------------------------------
+# ① atomic_categories  大类（8 个，可增）
+# ② atomic_events      原子事件（59 active + 4 candidate，最小可复用单元，自带起承转合）
+# ③ atomic_variants    变体（每本书每段的具体走法，纯追加，随新书增长）
+# ④ event_skeletons    骨架（原子序列 + 核心原子 + 可选环节）
+#
+# 三条设计红线（docs/10 §3.4）：
+#   1. **词表即数据**：新增原子/大类/骨架都只是 INSERT 一行，不改代码、不重跑管线；
+#   2. **变体表只存 atomic_id 外键**，不冗余存原子名/大类名 → 改名与分类调整零影响；
+#   3. **一切新增都是追加，不做全量重建**（旧 plot_templates 164 条保留不动，作回标素材）。
+#
+# 这三张表（categories/events/skeletons）是**全局共享**素材库，不带 project_id；
+# atomic_variants 同样全局（跨书检索是本架构的全部意义所在）。
+# ===========================================================================
+
+
+class AtomicCategoryORM(Base):
+    """原子大类（docs/10 §4 ①）：战斗 A / 交易 B / 社交 C / 危机 D / 移动 E / 修炼 F / 探索 G / 情感 H。
+
+    `sort_order` 决定前端与原子表 prompt 中的排列顺序 —— 顺序稳定性会影响 LLM 标注
+    （同一批原子按固定顺序给出，选择偏好才可复现），故不允许按名字默认排序。
+    """
+    __tablename__ = "atomic_categories"
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)      # 'A'/'B'/... 或 'HIS' 等新题材大类
+    name: Mapped[str] = mapped_column(String(40))                      # 战斗 / 交易 / 社交 … 朝堂 / 商界
+    domain: Mapped[str] = mapped_column(String(20), default="general")  # 题材领域
+    sort_order: Mapped[int] = mapped_column(Integer, default=100)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AtomicEventORM(Base):
+    """原子事件（docs/10 §4 ②）：最小可复用单元，自带起承转合。
+
+    `beat_start/mid/turn/end` = 起/承/转/合 四拍，是给 AI 标注与给组装注入的核心内容；
+    `status` 三态：active（正式词表）/ candidate（待定池，观察命中率再转正）/ deprecated。
+    """
+    __tablename__ = "atomic_events"
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)          # 'A01' / 'C11' / 'HIS03'
+    name: Mapped[str] = mapped_column(String(40), index=True)              # 4~8 字动词性短语，检索锚点
+    category_id: Mapped[str] = mapped_column(String(16), index=True)       # → atomic_categories.id
+    definition: Mapped[str | None] = mapped_column(Text, nullable=True)     # 一句话定义
+    beat_start: Mapped[str | None] = mapped_column(Text, nullable=True)     # 起
+    beat_mid: Mapped[str | None] = mapped_column(Text, nullable=True)       # 承
+    beat_turn: Mapped[str | None] = mapped_column(Text, nullable=True)      # 转
+    beat_end: Mapped[str | None] = mapped_column(Text, nullable=True)       # 合
+    is_core_capable: Mapped[bool] = mapped_column(Boolean, default=True)    # 能否当骨架核心
+    domain: Mapped[str] = mapped_column(String(20), default="general")
+    scope_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)    # ["宗门","朝堂"]
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)  # active/candidate/deprecated
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AtomicVariantORM(Base):
+    """原子变体（docs/10 §4 ③）：某本书某个段的具体走法 —— **纯追加，永不重建**。
+
+    🔴 只存 `atomic_id` 外键，不存原子名/大类名（docs/10 §3.4）：改名与分类调整零影响。
+    🔴 `book_name` + `arc_ref` 是**溯源必填**（docs/10 §5.1 三条保护之二）：
+       防 AI 编造来源 —— `book_name` 必须真实存在、`arc_ref` 必须能在 chapter_summaries 找到。
+    `hit_count` / `is_variant_of` 是「变体自动追加协议」的判重结果（sim ≥0.85 只计数；
+    0.70~0.85 新增并挂 is_variant_of 形成变体族），P1 阶段先只写 draft 行，不参与判重。
+    """
+    __tablename__ = "atomic_variants"
+    __table_args__ = (
+        Index("ix_variant_atomic", "atomic_id"),
+        # 幂等键（docs/10 §5「幂等：按 (arc_ref, segment_no) 唯一约束，重跑只更新不重复」）
+        UniqueConstraint("arc_ref", "segment_no", name="uq_variant_arc_segment"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    atomic_id: Mapped[str] = mapped_column(String(16))                     # → atomic_events.id
+    book_name: Mapped[str | None] = mapped_column(String(120), index=True)
+    arc_ref: Mapped[str | None] = mapped_column(String(160), index=True)    # '太荒吞天诀#51'
+    segment_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text: Mapped[str] = mapped_column(Text)                                # 具体走法（100~160 字，起因/经过/结果）
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)          # ["扮猪吃虎","苦肉计"]
+    source: Mapped[str] = mapped_column(String(10), default="ai")           # ai / author
+    is_variant_of: Mapped[str | None] = mapped_column(String(36), nullable=True)   # 变体族父指针
+    hit_count: Mapped[int] = mapped_column(Integer, default=1)              # 被多少条弧命中（sim≥0.85 累加）
+    quality: Mapped[str] = mapped_column(String(16), default="draft", index=True)  # draft/reviewed/rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class EventSkeletonORM(Base):
+    """事件骨架（docs/10 §4 ④）：原子序列 + 核心原子 + 可选环节，用于检索时组装。
+
+    `steps` = JSON 数组 `[{atomic_id, required, trigger, order}]`：
+      - `required=true`  = 列在骨架主链上的环节；
+      - `required=false` = 可选环节，`trigger` 记明挂载条件（如「竞价出现搅局者」）——
+        这是「同一核心、环节各异」体验的来源：可选环节取不取，取决于目标剧情。
+    `core_atomic` = 去掉它其余环节不成立的原子（docs/10 §4.3 判据）；组装时按它精确匹配。
+    """
+    __tablename__ = "event_skeletons"
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)          # 'S01'
+    name: Mapped[str] = mapped_column(String(80))                          # 拍卖会风云
+    core_atomic: Mapped[str] = mapped_column(String(16), index=True)        # 核心原子 id（组装时必须相同）
+    steps: Mapped[list] = mapped_column(JSON, nullable=False)               # [{atomic_id, required, trigger, order}]
+    domain: Mapped[str] = mapped_column(String(20), default="general")
+    scope_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    evidence: Mapped[list | None] = mapped_column(JSON, nullable=True)      # 代表弧 ["斗破苍穹#5", …]
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# 全局物品/技能库（docs/09 §7 双库设计 + E1 口径 2026-09-25 拍板；阶段 E2）
+# 三条硬纪律落 schema：① 条目库 brief ≤50 字、不存原文片段；② reference_only
+# 由注入层硬过滤（见 global_ref_crud.inject_*，不靠调用方自觉）；③ 尺度库只存结构。
+# ---------------------------------------------------------------------------
+class GlobalItemORM(Base):
+    """全局物品**条目库**：类型惯例词（筑基丹/储物袋/灵石…），E1 三问全过才入库。
+
+    `aliases` 是**变体归一**（G4 拍板）：储物袋/乾坤袋/须弥戒收为一条、四名互为别名，
+    抽取归一化（E3）按 name+aliases 精确匹配指向同一条目。
+    `reference_only=True` 的行只作研究、**禁止注入生成**（G3：≥2 本即收，但单源 IP 专名仍标此）。
+    """
+    __tablename__ = "global_items"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(60), index=True)               # 主名（惯例词）
+    category: Mapped[str] = mapped_column(String(20), index=True)           # 丹药/武器/防具/法器法宝/材料/灵石货币/符箓/信物/境界
+    genre: Mapped[str] = mapped_column(String(10), default="通用", index=True)  # 仙侠/历史/高武/通用（G5 预留）
+    brief: Mapped[str] = mapped_column(String(60))                          # 一句话通用说明（≤50 字，自写不抄）
+    full_desc: Mapped[str | None] = mapped_column(Text, nullable=True)      # 详细描述（60~120 字 AI 生成，管理页展示用）
+    aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)       # 变体名归一 ["乾坤袋","须弥戒"]
+    public_domain: Mapped[bool] = mapped_column(Boolean, default=False)     # 公有领域专名（轩辕剑类）
+    reference_only: Mapped[bool] = mapped_column(Boolean, default=False)    # True = 只作参考，禁止注入
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)  # active/disabled
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class GlobalSkillORM(Base):
+    """全局技能**条目库**（与 GlobalItemORM 同构）。技能类惯例词天然稀薄（功法名几乎全是
+    各书独创），预期条目少——主要价值在御剑术/遁术/生活职业这类跨书通用词。"""
+    __tablename__ = "global_skills"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(60), index=True)
+    category: Mapped[str] = mapped_column(String(20), index=True)           # 攻击技/身法遁术/幻术/阵法/生活职业/功法
+    genre: Mapped[str] = mapped_column(String(10), default="通用", index=True)
+    brief: Mapped[str] = mapped_column(String(60))
+    full_desc: Mapped[str | None] = mapped_column(Text, nullable=True)      # 详细描述（同 items）
+    aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    public_domain: Mapped[bool] = mapped_column(Boolean, default=False)
+    reference_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class GlobalItemScaleORM(Base):
+    """物品**尺度库**：类别级设计尺度（功能位/品阶轴/强度/代价/叙事位置）——
+    让 AI 会**造新的**而不千篇一律。🔴 只存结构不存成品描述（硬纪律③）。"""
+    __tablename__ = "global_item_scales"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    category: Mapped[str] = mapped_column(String(20), index=True)           # 与条目库 category 同词表
+    genre: Mapped[str] = mapped_column(String(10), default="通用", index=True)
+    function_pos: Mapped[str] = mapped_column(String(120))                  # 功能位：突破/疗伤/储物/飞行…
+    grade_axis: Mapped[str | None] = mapped_column(String(200), nullable=True)   # 品阶轴：凡兵→法器→灵器→法宝
+    intensity_scale: Mapped[str | None] = mapped_column(String(200), nullable=True)  # 强度尺度
+    cost_scale: Mapped[str | None] = mapped_column(String(200), nullable=True)       # 代价尺度
+    rarity: Mapped[str] = mapped_column(String(10), default="常见")          # 叙事位置：常见/稀有/传说
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)          # 体系设计说明（如灵石兑换比，G2）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GlobalSkillScaleORM(Base):
+    """技能**尺度库**（与 GlobalItemScaleORM 同构）。"""
+    __tablename__ = "global_skill_scales"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    category: Mapped[str] = mapped_column(String(20), index=True)
+    genre: Mapped[str] = mapped_column(String(10), default="通用", index=True)
+    function_pos: Mapped[str] = mapped_column(String(120))
+    grade_axis: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    intensity_scale: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cost_scale: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    rarity: Mapped[str] = mapped_column(String(10), default="常见")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
