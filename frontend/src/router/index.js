@@ -4,12 +4,14 @@ import ChatView from '@/views/ChatView.vue'
 import OverviewView from '@/views/OverviewView.vue'
 import DatabaseView from '@/views/DatabaseView.vue'
 import FactionView from '@/views/FactionView.vue'
+import ItemListView from '@/views/ItemListView.vue'
 import LocationView from '@/views/LocationView.vue'
 import WorldMapView from '@/views/WorldMapView.vue'
 import CharacterRelationView from '@/views/CharacterRelationView.vue'
 import ForeshadowView from '@/views/ForeshadowView.vue'
 import ChapterListView from '@/views/ChapterListView.vue'
 import TemplateView from '@/views/TemplateView.vue'
+import GlobalRefView from '@/views/GlobalRefView.vue'
 import ModelConfigView from '@/views/ModelConfigView.vue'
 import ReferenceView from '@/views/ReferenceView.vue'
 import GlobalReferenceView from '@/views/GlobalReferenceView.vue'
@@ -63,6 +65,8 @@ const routes = [
         meta: { title: '关系网',   tab: 'sub', tabParent: 'database', order: 2 } },
       { path: 'database-skill',    name: 'database-skill',     component: SkillListView,
         meta: { title: '技能库',   tab: 'sub', tabParent: 'database', order: 3 } },
+      { path: 'database-item',     name: 'database-item',      component: ItemListView,
+        meta: { title: '物品库',   tab: 'sub', tabParent: 'database', order: 3.5 } },
       { path: 'faction',           name: 'faction',            component: FactionView,
         meta: { title: '势力库',   tab: 'sub', tabParent: 'database', order: 4 } },
       { path: 'world-map',         name: 'world-map',          component: WorldMapView,
@@ -90,6 +94,8 @@ const routes = [
       // 不设独立表/页面（2026-09-10，见 docs/03 §1）。
       { path: 'chapters',    name: 'chapters',    component: ChapterListView, meta: { title: '章节列表',   hideTab: true } },
       { path: 'template',    name: 'template',    component: TemplateView,    meta: { title: '套路模板',   hideTab: true } },
+      // E3 物品/技能库：与情节模板库同层，页面内 el-tabs 切换（入口：模板库页子导航）
+      { path: 'global-ref',  name: 'global-ref',  component: GlobalRefView,   meta: { title: '物品技能库', hideTab: true } },
       // 设定库 / 写作 SKILL 与左侧边栏入口同级，进入后不显示顶部 tab（见 #7）
       { path: 'setting',      name: 'setting',      component: SettingView,      meta: { title: '设定库',     hideTopNav: true } },
       { path: 'custom-skill', name: 'custom-skill', component: CustomSkillView, meta: { title: '写作 SKILL', hideTopNav: true } },
