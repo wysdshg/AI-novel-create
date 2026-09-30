@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models.orm import SkillORM
 from app.services import entity_relation_crud as er  # A2 双写
+from app.services import global_ref_crud  # E3 惯例词归一
 from app.schemas.database import Skill, SkillCreate, SkillUpdate
 
 
@@ -100,10 +101,13 @@ def delete_skill(db: Session, project_id: str, skill_id: str) -> bool:
 
 
 def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -> dict:
-    """AI 抽取的 kind=skill 新技能 → 落库（幂等，重名跳过；**标 ai_generated**，docs/09 M8）。"""
+    """AI 抽取的 kind=skill 新技能 → 落库（幂等，重名跳过；**标 ai_generated**，docs/09 M8）。
+
+    E3（docs/03 阶段E）：命中全局条目库惯例词（御剑术/火球术…）不建本地条目，归一指向条目库。
+    """
     import logging
     _log = logging.getLogger(__name__)
-    stats = {"created": 0, "skipped": 0}
+    stats = {"created": 0, "skipped": 0, "normalized": 0}
     for item in new_entities or []:
         if not isinstance(item, dict):
             continue
@@ -112,6 +116,9 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
         name = str(item.get("name") or "").strip()
         if not name:
             stats["skipped"] += 1
+            continue
+        if global_ref_crud.normalize_lookup(db, name) is not None:
+            stats["normalized"] += 1
             continue
         dup = db.query(SkillORM).filter_by(project_id=project_id, name=name).first()
         if dup is not None:

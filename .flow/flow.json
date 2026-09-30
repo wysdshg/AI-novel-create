@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-09-30T14:19:46.463Z",
+  "updatedAt": "2026-09-30T15:18:18.691Z",
   "modules": {
     "0": {
       "id": "0",
@@ -648,11 +648,11 @@
           "id": "F7",
           "type": "process",
           "name": "各书后半段扩章",
-          "description": "遮天/九星/太荒后续段扩章，按用户选题材优先级排",
+          "description": "后半段扩章实况（2026-09-30 查库）：太荒已完成剔除；剩余=九星 601~1800 切段切弧 + 遮天全本 1824 章从切段起步（0 弧）；另有斗破 600+ / 寒门枭士 / 赘婿 / 圣墟 / 逆天邪神等已灌未切可选。按用户选题材优先级排",
           "location": "",
           "state": "to_plan",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-09-30T15:08:36.205Z"
         },
         "F8": {
           "id": "F8",
@@ -847,22 +847,22 @@
           "id": "E2",
           "type": "process",
           "name": "建 4 张小表+灌库",
-          "description": "条目库/尺度库 4 张表建成 + global_ref_crud（幂等/别名归一/硬过滤/统计），单测 8/8；种子灌库 46 词条 + 6 尺度（说明全自写 ≤50 字，规避抄袭）",
+          "description": "条目库/尺度库 4 张表建成 + global_ref_crud（幂等/别名归一/硬过滤/统计），单测 8/8；种子灌库 46 词条 + 6 尺度。2026-09-30 查库实测已扩至：物品 610 条（丹药173/材料146/武器102/法器89/灵石货币31/符箓28/防具20/信物11/境界10）+ 技能 237 条（阵法163/攻击技29/功法25…），全 active——批量扩充未回写文档，本条为更正",
           "location": "backend/app/services/global_ref_crud.py",
           "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z",
+          "updatedAt": "2026-09-30T15:08:36.205Z",
           "doc": ".flow/docs/global-ref-store.md"
         },
         "E3": {
           "id": "E3",
           "type": "process",
           "name": "抽取归一化接入",
-          "description": "AI 抽到洗髓丹/灵石这类通用词时指向条目库，不在每本书里重复建条目",
+          "description": "✅ 2026-09-30：item_crud / skill_crud 的 sync_from_extract 落库前接 global_ref_crud.normalize_lookup——命中惯例词（主名/别名）不建本地条目，统计增 normalized 计数；disabled 条目不归一（只认 active）。新增单测 2 例（主名+别名命中/库外照常建/disabled 不归一），全量 544 passed",
           "location": "",
-          "state": "to_plan",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-09-30T15:18:18.690Z"
         },
         "E4": {
           "id": "E4",
@@ -1178,11 +1178,11 @@
           "id": "B1",
           "type": "process",
           "name": "太荒模板扩容收尾",
-          "description": "把太荒的弧补切完、蒸馏单弧、出画像、重排索引",
+          "description": "太荒切弧已实测完成（2026-09-30 查库：69 弧覆盖 1~1200 全部 1009 章，末弧 1188~1200），单弧已进模板池（13 条 active 模板来源含太荒）；剩余 --stage profile / reindex / 出模板库报告的验收步骤待跑。原描述『~20 次调用待做』已过时",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-09-30T15:08:36.204Z"
         },
         "B2": {
           "id": "B2",
@@ -1198,11 +1198,11 @@
           "id": "B3",
           "type": "process",
           "name": "九星继续扩容",
-          "description": "九星 601~1200 章继续切，按用户选题材优先级",
+          "description": "九星 601~1800 章继续切段切弧（--arc-append）。2026-09-30 查库实测：库里已灌 1~1800 共 1765 章全带摘要，切弧止于 600（38 弧）——原写 1200 已过时，可切范围实为 601~1800。按用户选题材优先级排",
           "location": "",
           "state": "to_plan",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-09-30T15:08:36.205Z"
         },
         "C1": {
           "id": "C1",

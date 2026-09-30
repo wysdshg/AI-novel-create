@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.orm import ItemORM
+from app.services import global_ref_crud
 
 
 def _now():
@@ -80,9 +81,12 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
 
     分级（docs/09 M8）：name/category 必填；summary 由 AI 生成但可辨识（作者可改）。
     已存在的物品**不覆盖**（描述落库即定死——用户 2026-09-18 拍板）。
+    E3（docs/03 阶段E）：抽取落库前先查全局条目库（主名/别名），命中「类型惯例词」
+    （洗髓丹/灵石/乾坤袋…）即**不建本地条目**——通用词归一指向条目库，
+    避免各书重复写描述（描述落库即定死，重复建无法回收）。
     只 add + flush 不 commit（调用方统一提交，照 faction_crud 范式）。
     """
-    stats = {"created": 0, "skipped": 0}
+    stats = {"created": 0, "skipped": 0, "normalized": 0}
     for item in new_entities or []:
         if not isinstance(item, dict):
             continue
@@ -91,6 +95,9 @@ def sync_from_extract(db: Session, project_id: str, new_entities: list | None) -
         name = str(item.get("name") or "").strip()
         if not name:
             stats["skipped"] += 1
+            continue
+        if global_ref_crud.normalize_lookup(db, name) is not None:
+            stats["normalized"] += 1
             continue
         dup = db.query(ItemORM).filter_by(project_id=project_id, name=name).first()
         if dup is not None:
