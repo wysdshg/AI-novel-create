@@ -13,7 +13,7 @@
 import pytest
 
 from app.core.context.builder import build_discussion_system
-from app.models.orm import CharacterORM, RelationORM
+from app.models.orm import CharacterORM, EntityRelationORM
 from app.services import app_config, entity_graph
 
 PID = "p-graph"
@@ -32,8 +32,9 @@ def seeded(test_db):
         CharacterORM(id="c3", project_id=PID, name="王五", role_type="配角",
                      background=BG_WANGWU, personality="随和"),
     ])
-    test_db.add(RelationORM(id="r1", project_id=PID, subject_id="c1", object_id="c2",
-                            relation_type="师徒", strength=8))
+    test_db.add(EntityRelationORM(id="r1", project_id=PID, a_id="c1", a_type="character",
+                                  b_id="c2", b_type="character", relation_type="师徒",
+                                  meta={"strength": 8}))
     test_db.commit()
     return test_db
 

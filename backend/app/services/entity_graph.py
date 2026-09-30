@@ -24,7 +24,7 @@
 import logging
 from sqlalchemy.orm import Session
 
-from app.models.orm import CharacterORM, FactionORM, LocationORM, RelationORM
+from app.models.orm import CharacterORM, EntityRelationORM, FactionORM, LocationORM
 from app.services import app_config
 
 KEY_GRAPH_EXPAND = "retrieval.graph_expand"
@@ -80,7 +80,12 @@ def expand(
         chars = db.query(CharacterORM).filter_by(project_id=project_id).all()
         factions = db.query(FactionORM).filter_by(project_id=project_id).all()
         locations = db.query(LocationORM).filter_by(project_id=project_id).all()
-        relations = db.query(RelationORM).filter_by(project_id=project_id).all()
+        # A6 遗留清理（2026-10-01）：读新表 entity_relations 的角色对边（旧表 relations 已退役）
+        relations = (
+            db.query(EntityRelationORM)
+            .filter_by(project_id=project_id, a_type="character", b_type="character")
+            .all()
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[entity_graph] 读表失败，跳过扩展: {type(e).__name__}: {e}")
         return out, {"enabled": True, "error": f"{type(e).__name__}: {str(e)[:80]}",
@@ -95,15 +100,17 @@ def expand(
     # 关系强度高的先纳入：师徒/血亲比「点头之交」更该知道
     neighbor: dict[str, tuple[int, str]] = {}  # id -> (best strength, relation_type)
     for r in relations:
-        a, b = r.subject_id, r.object_id
+        a, b = r.a_id, r.b_id
+        strength = (r.meta or {}).get("strength") or 0
+        rtype = r.relation_type or ""
         if a in seed_char_ids and b not in seed_char_ids:
             cur = neighbor.get(b)
-            if cur is None or r.strength > cur[0]:
-                neighbor[b] = (r.strength or 0, r.relation_type or "")
+            if cur is None or strength > cur[0]:
+                neighbor[b] = (strength, rtype)
         elif b in seed_char_ids and a not in seed_char_ids:
             cur = neighbor.get(a)
-            if cur is None or r.strength > cur[0]:
-                neighbor[a] = (r.strength or 0, r.relation_type or "")
+            if cur is None or strength > cur[0]:
+                neighbor[a] = (strength, rtype)
 
     ranked = sorted(
         neighbor.items(),

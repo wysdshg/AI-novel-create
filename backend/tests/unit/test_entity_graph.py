@@ -8,7 +8,7 @@
 """
 import pytest
 
-from app.models.orm import CharacterORM, FactionORM, LocationORM, RelationORM
+from app.models.orm import CharacterORM, EntityRelationORM, FactionORM, LocationORM
 from app.services import entity_graph
 
 
@@ -32,8 +32,10 @@ def _loc(db, pid, lid, name, related_ids=None):
 
 
 def _rel(db, pid, rid, s, o, rtype="师徒", strength=50):
-    db.add(RelationORM(id=rid, project_id=pid, subject_id=s, object_id=o,
-                       relation_type=rtype, strength=strength))
+    # A6 遗留清理：一跳扩展已改读新表 entity_relations
+    db.add(EntityRelationORM(id=rid, project_id=pid, a_id=s, a_type="character",
+                             b_id=o, b_type="character", relation_type=rtype,
+                             meta={"strength": strength}))
     db.commit()
 
 

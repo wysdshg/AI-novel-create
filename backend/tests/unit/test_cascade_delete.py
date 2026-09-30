@@ -119,7 +119,7 @@ def _seed_four_levels(db):
 
     from app.models.orm import (
         CharacterORM, ChapterMemoryORM, DiscussionMessageORM, FactionORM,
-        LocationORM, ProjectORM, ReferenceDocORM, RelationORM, SkillORM,
+        LocationORM, ProjectORM, ReferenceDocORM, EntityRelationORM, RelationORM, SkillORM,
     )
     from app.schemas.chapter import ChapterCreate
     from app.schemas.article import ArticleCreate
@@ -136,8 +136,10 @@ def _seed_four_levels(db):
     c1, c2 = _uuid.uuid4().hex, _uuid.uuid4().hex
     db.add(CharacterORM(id=c1, project_id=pid, name="角色甲"))
     db.add(CharacterORM(id=c2, project_id=pid, name="角色乙"))
-    db.add(RelationORM(id=_uuid.uuid4().hex, project_id=pid,
-                       subject_id=c1, object_id=c2, relation_type="师徒"))
+    # 旧表 relations 已退役（A6 遗留清理）；级联清理测新表通用边（1.9 remove_edges_of）
+    db.add(EntityRelationORM(id=_uuid.uuid4().hex, project_id=pid,
+                             a_id=c1, a_type="character", b_id=c2, b_type="character",
+                             relation_type="师徒"))
     db.add(SkillORM(id=_uuid.uuid4().hex, project_id=pid, name="技能", owner_id=c1))
     loc = LocationORM(id=_uuid.uuid4().hex, project_id=pid, name="某地", related_ids=[c1, c2])
     db.add(loc)
@@ -161,14 +163,14 @@ def _seed_four_levels(db):
 def test_delete_character_clears_references(test_db):
     """删角色必须同时清掉：关系（两端任一）、技能 owner、地点关联、势力成员/掌门。"""
     from app.models.orm import (
-        FactionORM, LocationORM, RelationORM, SkillORM,
+        EntityRelationORM, FactionORM, LocationORM, SkillORM,
     )
     from app.services import character_crud
 
     pid, _vid, _aid, _cid, c1 = _seed_four_levels(test_db)
     character_crud.delete_character(test_db, pid, c1)
 
-    for m in (RelationORM, SkillORM):
+    for m in (EntityRelationORM, SkillORM):
         assert test_db.query(m).filter_by(project_id=pid).count() == 0, \
             f"{m.__tablename__} 残留孤儿（指向已删角色）"
     loc = test_db.query(LocationORM).filter_by(project_id=pid).first()

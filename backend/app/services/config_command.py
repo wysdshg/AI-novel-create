@@ -17,7 +17,7 @@ import time
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import CharacterORM, FactionORM, LocationORM, RelationORM
+from app.models.orm import CharacterORM, EntityRelationORM, FactionORM, LocationORM
 from app.schemas.database import (
     CharacterCreate, CharacterUpdate,
     FactionCreate, FactionUpdate,
@@ -395,8 +395,8 @@ def _apply(db: Session, project_id: str, data: dict):
         if not subj_id or not obj_id:
             changes["relations"].append({"subject": subj, "object": obj, "action": "skipped", "reason": "未找到对应角色"})
             continue
-        dup = db.query(RelationORM).filter_by(
-            project_id=project_id, subject_id=subj_id, object_id=obj_id
+        dup = db.query(EntityRelationORM).filter_by(
+            project_id=project_id, a_id=subj_id, b_id=obj_id
         ).first()
         if dup:
             changes["relations"].append({"subject": subj, "object": obj, "action": "skipped", "reason": "关系已存在"})

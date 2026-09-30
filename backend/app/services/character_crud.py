@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import ChapterMemoryORM, CharacterORM, FactionORM, LocationORM, RelationORM, SkillORM
+from app.models.orm import ChapterMemoryORM, CharacterORM, FactionORM, LocationORM, SkillORM
 from app.schemas.database import Character, CharacterCreate, CharacterUpdate
 
 
@@ -121,10 +121,7 @@ def delete_character(db: Session, project_id: str, character_id: str) -> bool:
         return False
     name = o.name or ""
 
-    # 1) 关系：两端任一指向该角色即删除
-    db.query(RelationORM).filter_by(project_id=project_id).filter(
-        (RelationORM.subject_id == character_id) | (RelationORM.object_id == character_id)
-    ).delete(synchronize_session=False)
+    # 1) 关系：旧表 relations 已退役（A6 遗留清理 2026-10-01），通用边清理见 1.9
 
     # 1.5) 章级记忆 characters 列（按名字匹配，与列内存储形态一致）
     for mem in db.query(ChapterMemoryORM).filter_by(project_id=project_id).all():

@@ -9,7 +9,7 @@ sync 函数只 add+flush 不 commit（调用方统一提交），测试里显式
 """
 import pytest
 
-from app.models.orm import ChapterMemoryORM, CharacterORM, FactionORM, RelationORM
+from app.models.orm import ChapterMemoryORM, CharacterORM, EntityRelationORM, FactionORM
 from app.services import faction_crud, ingestion, relation_crud
 
 
@@ -40,7 +40,9 @@ def two_chars(test_db, proj):
 
 
 def _rels(db, pid):
-    return db.query(RelationORM).filter_by(project_id=pid).all()
+    # A6 遗留清理：sync_from_extract 已写新表 entity_relations
+    return db.query(EntityRelationORM).filter_by(
+        project_id=pid, a_type="character", b_type="character").all()
 
 
 # ===========================================================================
@@ -57,10 +59,10 @@ def test_sync_relations_basic(test_db, proj, two_chars):
     rows = _rels(test_db, proj)
     assert len(rows) == 1
     r = rows[0]
-    assert r.subject_id == two_chars["陈砚"]
-    assert r.object_id == two_chars["赵烈"]
+    assert r.a_id == two_chars["陈砚"]
+    assert r.b_id == two_chars["赵烈"]
     assert r.relation_type == "师徒"
-    assert r.strength == 50, "统计类字段不交给 LLM，统一 default=50"
+    assert r.meta["strength"] == 50, "统计类字段不交给 LLM，统一 default=50"
     assert "3" in (r.note or "")
 
 
