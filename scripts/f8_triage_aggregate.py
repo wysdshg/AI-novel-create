@@ -233,16 +233,30 @@ def main():
     for b, a in merged_into.items():
         members_of[a].append(b)
     all_ids = {nm for nm in obs if nm not in merged_into} | set(keep_new)
+
+    def safe_aliases(nm, raw):
+        """防串门 2.0：剔除其他角色主名 + 剔除与其他角色名构成包含关系的别称
+        （器灵⊂器灵子 事故：银月 290 vs 真实 197 的差额来源）。"""
+        out = set()
+        for a in raw:
+            if a == nm or a in all_ids:
+                continue
+            if any((a in b or b in a) and a != b for b in all_ids):
+                continue
+            if clean_alias(a):
+                out.add(a)
+        return out
+
     for nm in obs:
         if nm in merged_into:
             continue
         # 🔴 别称必须并集：密度原始别称 ∪ 分诊登记别称（丢了前者=汪凝档案0事故）
-        # 🔴 防串门：剔除其他角色的主名（厉飞雨≠韩立别称，哪怕某批登记错了）
-        aliases = ((roster_alias.get(nm, set()) | obs[nm]["aliases"]) - all_ids) - {nm}
-        aliases = {a for a in aliases if clean_alias(a)}
+        raw = (roster_alias.get(nm, set()) | obs[nm]["aliases"]) - {nm}
+        aliases = safe_aliases(nm, raw)
         for b in members_of.get(nm, []):
             aliases.add(b)  # 被并者主名降为别称
-            aliases |= ((roster_alias.get(b, set()) | obs.get(b, {}).get("aliases", set())) - all_ids) - {b}
+            raw_b = (roster_alias.get(b, set()) | obs.get(b, {}).get("aliases", set())) - {b}
+            aliases |= safe_aliases(nm, raw_b)
         aliases = {a for a in aliases if clean_alias(a)}
         names_lines.append(nm + (("\t" + ",".join(sorted(aliases))) if aliases else ""))
     for nm in keep_new:
