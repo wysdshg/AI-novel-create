@@ -24,6 +24,35 @@ from datetime import datetime
 
 GRADE_NAME = {0: "无关配角", 1: "断续配角", 2: "篇章级", 3: "卷级", 4: "小说级", 5: "全书级/主角"}
 
+# 泛称黑名单（精确匹配）：这些词谁都能被叫，进别称集合会把密度扫成全文命中
+# （青元子 45→1081 事故根因）。带区分度的称谓（厉师兄/千秋圣女/墨老）不受影响。
+GENERIC_ALIASES = frozenset({
+    "主人", "主上", "大人", "前辈", "道友", "小友", "仙子", "公子", "小姐", "小婢",
+    "丫鬟", "丫头", "本妃", "王妃", "公主", "大公主", "二公主", "殿下", "魔头", "妖女",
+    "小妖狐", "小狐狸", "小狐", "人族修士", "下界修士", "下界飞升修士", "下界小子",
+    "修士", "魔修", "朋友", "贵客", "客人", "上仙", "尊者", "圣祖", "老祖", "圣女",
+    "圣子", "长老", "门主", "堂主", "护法", "使者", "师尊", "师叔", "师伯", "师祖",
+    "师妹", "师姐", "师弟", "师兄", "兄弟", "晚辈", "小子", "小家伙", "怪物", "妖孽",
+    "真人", "道长", "这位道友", "这位前辈", "此女", "此子", "那人", "那人影",
+    # —— 2026-10-01 全量跑后按实伤扩充（青元子 45→1076 等事故）——
+    "老者", "老人", "老妪", "老魔", "老怪物", "少女", "姑娘", "女子", "少妇", "妇人",
+    "男子", "青年", "中年人", "中年男子", "大汉", "汉子", "师傅", "师父", "义父",
+    "义母", "夫君", "夫人", "妾身", "本宫", "祖师", "祖师爷", "队长", "领队",
+    "新任队长", "白狐", "银狼", "巨狼", "魔像", "血灵", "圣祖大人", "大长老", "二长老",
+    "飞升修士", "神秘修士", "披发修士", "天南修士", "海外散修", "外族人", "外来人",
+    "异族人", "夺宝之人", "青色身影", "青衫青年", "青袍人", "黑袍青年", "灰袍老者",
+    "白袍少女", "白衣女子", "黑袍女子", "宫装女子", "蓝袍女子", "银衫女子", "银发女子",
+    "银杉女子", "黄脸修士", "紫脸大汉", "虬须大汉", "妖猿", "妖修", "小怪物", "小辈",
+    "人族小子", "仙师", "寒仙师", "韩仙师", "大长老", "此獠", "这厮", "客人", "来客",
+})
+
+def clean_alias(a):
+    """泛称过滤：黑名单精确命中或超长修饰串（>6字多半是描述不是称呼）一律丢弃。"""
+    a = (a or "").strip()
+    if not a or len(a) > 6 or a in GENERIC_ALIASES:
+        return None
+    return a
+
 # ---------- 1~3. 批次合并 ----------
 
 def merge_batches(density, triage_dir):
@@ -56,6 +85,9 @@ def merge_batches(density, triage_dir):
                 o["behaviors"].append({"batch": bno, "span": [min(chs), max(chs)] if chs else [],
                                         "behavior": c["behavior"]})
             for a in c.get("aliases", []):
+                a = clean_alias(a)
+                if not a:
+                    continue
                 o["aliases"].add(a)
                 alias2host.setdefault(a, nm)
             sg = c.get("grade_suggest")
@@ -207,9 +239,11 @@ def main():
         # 🔴 别称必须并集：密度原始别称 ∪ 分诊登记别称（丢了前者=汪凝档案0事故）
         # 🔴 防串门：剔除其他角色的主名（厉飞雨≠韩立别称，哪怕某批登记错了）
         aliases = ((roster_alias.get(nm, set()) | obs[nm]["aliases"]) - all_ids) - {nm}
+        aliases = {a for a in aliases if clean_alias(a)}
         for b in members_of.get(nm, []):
             aliases.add(b)  # 被并者主名降为别称
             aliases |= ((roster_alias.get(b, set()) | obs.get(b, {}).get("aliases", set())) - all_ids) - {b}
+        aliases = {a for a in aliases if clean_alias(a)}
         names_lines.append(nm + (("\t" + ",".join(sorted(aliases))) if aliases else ""))
     for nm in keep_new:
         names_lines.append(nm)
