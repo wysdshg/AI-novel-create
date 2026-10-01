@@ -37,12 +37,17 @@
 ```
 保留不动：slot / desc / mode / beats / srcs / ranks / traits(12维冻结) / basis
 新增 L4：voice（结构化维度[语域/幽默类型/攻防模式/注意力偏向] + sample_refs 2~3条指针）
-        behavior_patterns（行为模式 + 标志性小动作/口头禅模式）
-        arc_stance_curve（[{beat, stance}] 节拍态度曲线）
-        relation_hooks（[{to_slot, kind, attitude}] 带态度的关系钩子）
+        behavior_patterns（行为模式 + 标志性小动作/口头禅模式 + 立场演变模式一句话）
         contrast（表里反差结构，跨案例归纳）★核心_conflict 同理
         core_conflict（欲望-软肋结构）
         slot_kind（person | goldfinger | entity，可扩展）
+        relation_hooks（❓2026-10-01 用户反馈待拍板：A 模式化[对上/对下/对敌态度模式，去人名，建议票] vs B 删除；
+          结构化建边无论取舍都在观测层 GraphRAG 做，不占模板）
+变更记录（2026-10-01 用户预览反馈）：
+  - arc_stance_curve 移出模板字段（逐章曲线=单书剧情数据，不可复用）→ 归观测层/实例层；
+    模板价值吸收为 behavior_patterns 里的「立场演变模式」一句话
+  - sample_refs 口径明确：模板只存指针（book/章/段 或台词库行id），原文永不入模板；
+    人类可读标签扩为 2~3 句场景概括，抽检对照页做「点指针展开原文」
 ```
 
 三仓分配（C1b 并入本机制一次性定）：**台账**（结构化可 diff）/ **向量文本**（archetype_text 扩展版，

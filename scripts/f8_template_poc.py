@@ -101,7 +101,8 @@ def collect_material(char, density, triage_dir):
     return dres, behaviors, sorted(aliases)
 
 def pick_quotes(book_dir, chapter_map, names, max_quotes=3, max_len=120):
-    """抽取含角色名+引号对话的段落作台词参考（只作 LLM 输入，不落盘进模板）。"""
+    """抽取含角色名+对话引号的段落作台词参考（只作 LLM 输入，不落盘进模板）。
+    引号兼容：「」与 “...”（凡人等多数网文源用后者）。"""
     quotes = []
     seen_ch = set()
     for chno, fn in chapter_map:
@@ -112,7 +113,9 @@ def pick_quotes(book_dir, chapter_map, names, max_quotes=3, max_len=120):
         text = open(os.path.join(book_dir, fn), encoding="utf-8", errors="ignore").read()
         for para in text.split("\n"):
             para = para.strip()
-            if len(para) < 10 or "「" not in para:
+            if len(para) < 10:
+                continue
+            if ("「" not in para) and ("“" not in para and '"' not in para):
                 continue
             if any(nm in para for nm in names):
                 q = para[:max_len]
@@ -135,10 +138,9 @@ SYS_PROMPT = """你是角色模板提取器。给你某角色在小说连续章�
  "trait_basis": {"维度名": "一句话真书依据（最多给6个最显著的维度）"},
  "voice": {"语域": "…", "幽默类型": "…", "攻防模式": "…", "注意力偏向": "…",
            "记忆点": "1~2 个口头禅或标志性小动作（须有真书依据）",
-           "sample_refs": [{"chapter": 章号, "scene": "场景一句话描述"}]},
- "behavior_patterns": ["行为模式，每条一句"],
- "arc_stance_curve": [{"chapter": 章号, "stance": "该章段的态度/立场一句话"}],
- "relation_hooks": [{"to": "角色名", "kind": "关系类型", "attitude": "态度"}]
+           "sample_refs": [{"chapter": 章号, "scene": "2~3 句场景概括（谁在哪做了什么、场面与结果）"}]},
+ "behavior_patterns": ["行为模式，每条一句；其中一条须是「立场演变模式」（对威胁/对利益/对人的态度如何随处境变化）"],
+ "relation_patterns": [{"target": "上位者|同伴|敌人|亲人|陌生人", "pattern": "对该类人的典型态度模式"}]
 }
 
 12 维Traits刻度（-10~+10，双极）：altruism利他↔自私、honor信义↔背信、mercy仁慈↔狠辣、resolve坚毅↔易摧、decisiveness果决↔犹豫、discipline自律↔放纵、risk冒险↔稳健、rationality理性↔冲动、guile城府↔直率、idealism理想↔务实、warmth热忱↔冷漠、dominance强势↔随和。
@@ -147,8 +149,9 @@ SYS_PROMPT = """你是角色模板提取器。给你某角色在小说连续章�
 - 只准用 0、±1、±4、±7、±10；给 ±7/±10 的维度必须在 trait_basis 里给真书依据。
 - 全部依据观测材料，禁止编造材料里没有的行为；材料没覆盖的维度写 0 并少话。
 - 台词参考只用于提炼腔调与记忆点，输出里禁止整句照抄原文（只留章号指针与模式描述）。
-- sample_refs 每条 scene 用你自己的话概括场景，禁止抄原句。
-- arc_stance_curve 按观测材料的时间顺序 3~6 个节点，体现态度变化或一致性。"""
+- sample_refs 每条 scene 用你自己的话写 2~3 句场景概括，禁止抄原句。
+- relation_patterns 只写「对某类人的态度模式」，禁止绑定具体人名（2026-10-01 口径）。
+- 输出没有 arc_stance_curve 字段（已移出模板，2026-10-01 口径）。"""
 
 def build_user_prompt(char, dres, behaviors, aliases, quotes, n_chapters_total):
     L = [f"【角色】{char}" + (f"（别称：{'、'.join(aliases)}）" if aliases else "")]
@@ -199,10 +202,8 @@ def render_html(all_templates, out_path):
         refs = "".join(f'<span style="background:#f3f4f6;border-radius:4px;padding:1px 6px;'
                        f'margin-right:6px;font-size:11px">第{r.get("chapter")}章 {html.escape(r.get("scene",""))}</span>'
                        for r in voice.get("sample_refs", []))
-        curve = "".join(f'<li>第{c.get("chapter")}章：{html.escape(c.get("stance",""))}</li>'
-                        for c in d.get("arc_stance_curve", []))
-        hooks = "".join(f'<li>{html.escape(h.get("to",""))}（{html.escape(h.get("kind",""))}）：'
-                        f'{html.escape(h.get("attitude",""))}</li>' for h in d.get("relation_hooks", []))
+        hooks = "".join(f'<li>{html.escape(h.get("target",""))}：{html.escape(h.get("pattern",""))}</li>'
+                        for h in d.get("relation_patterns", d.get("relation_hooks", [])))
         pats = "".join(f'<li>{html.escape(p)}</li>' for p in d.get("behavior_patterns", []))
         cards.append(f'''
 <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:18px 22px;margin:14px 0">
@@ -222,9 +223,8 @@ def render_html(all_templates, out_path):
     <b>样本指针：</b>{refs}
   </div>
   <div style="display:flex;gap:18px">
-    <div style="flex:1"><b style="font-size:13px">行为模式</b><ul style="font-size:13px;color:#374151;margin:4px 0;padding-left:18px">{pats}</ul></div>
-    <div style="flex:1"><b style="font-size:13px">态度曲线</b><ul style="font-size:13px;color:#374151;margin:4px 0;padding-left:18px">{curve}</ul></div>
-    <div style="flex:1"><b style="font-size:13px">关系钩子</b><ul style="font-size:13px;color:#374151;margin:4px 0;padding-left:18px">{hooks}</ul></div>
+    <div style="flex:1.2"><b style="font-size:13px">行为模式（含立场演变）</b><ul style="font-size:13px;color:#374151;margin:4px 0;padding-left:18px">{pats}</ul></div>
+    <div style="flex:1"><b style="font-size:13px">关系模式（对类不对人）</b><ul style="font-size:13px;color:#374151;margin:4px 0;padding-left:18px">{hooks}</ul></div>
   </div>
   <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;font-size:12px;color:#92400e;margin-top:10px">
     core_conflict / contrast 按设计（D4）留空：这两项走「案例库两级归纳」，禁止从单书原文硬提，P2 阶段填充。
