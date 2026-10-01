@@ -7,6 +7,7 @@
 
 ## 2026-10-01
 
+- **F8 机制设计定稿 🔵：新角色模板机制 v2.0（`.flow/docs/skeleton-cast-ranks-traits.md` 全文重写）**。病根=cast 在「概括后再概括」文本上提取提不出立体角色；定稿：四层字段模型补齐 L4（voice/behavior_patterns/arc_stance_curve/relation_hooks/contrast/core_conflict/slot_kind）+ 六档角色阶梯（出场密度游程算法+LLM 批次分诊双信号）+ trait_anchors 数据聚类校准（用户抽检分档对照页）+ goldfinger_refs 机制库 15 字段（含金手指类型学调研）+ 台词库一表双轴 + 观测层真名直通/入库前匿名核账 + contrast 名角色案例库两级。**「备查小修」（改 prompt 重跑 100 条）正式作废**。flow 图 F8 → planned；docs/03 F8/C1b 行同步。实施待排：P0 素材底座（密度统计+分诊，先跑 2~3 本书，建议没钱修什么仙+凡人+群像文赘婿）。
 - **A6 遗留清理 ✅：旧表 relations 退役，阶段A 双写包袱卸除**（551 单测全绿）。`relation_crud` 重写为直读 `entity_relations`（API 契约不变：subject/object↔a_id/b_id，strength↔meta.strength；update 改原对象改字段保 id 稳定）；`entity_graph` 一跳扩展改读新表角色对边；`config_command` 查重、`character_crud` 删角色级联同步切换；A2 双写停止，`RelationORM` 读写点清零（ORM 类与表数据保留，迁移能力留档）。测试适配：entity_graph/entity_sync/discussion_graph/cascade_delete/data_model_a2 共 5 文件。
 - **flow 图对账大扫除**：M2/M4 模块描述更新为全绿收口、M3 反映 F9+F8+冻结现状、T1 关系边表描述从"0 条病根"改为数据落地+唯一事实源；C2/C4/B3/F7 四个 to_plan 按拍板转 frozen（挂起待触发）。
 

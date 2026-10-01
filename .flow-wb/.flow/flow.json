@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作系统（WorkBuddy 主图）",
-  "updatedAt": "2026-09-27T14:43:41.306Z",
+  "updatedAt": "2026-10-01T09:34:26.539Z",
   "modules": {
     "0": {
       "id": "0",
@@ -391,52 +391,52 @@
         "F80": {
           "id": "F80",
           "type": "process",
-          "name": "B1 改 label_skeleton_casts.py",
-          "description": "加 --fill-ranks 模式：prompt 要求补 ranks(位阶列表)+traits(12维1~7)+basis；validate 加两字段校验；merge 不覆盖已有字段",
+          "name": "P0 素材底座",
+          "description": "出场密度统计脚本（间隔容忍游程合并）+每书别称表+Flash-Next 批次分诊（20~30章/批）跑通 2~3 本书（建议没钱修什么仙+凡人+群像文赘婿）；验收=分档清单人工抽检",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-09-27T14:35:57.077Z"
+          "updatedAt": "2026-10-01T09:34:26.536Z"
         },
         "F81": {
           "id": "F81",
           "type": "process",
-          "name": "B2 dry-run 3 条抽检",
-          "description": "对照旧 164 条取值习惯人工看质量",
+          "name": "P1 提取器",
+          "description": "按档提取：观测层（真名主键+证据指针）→聚合→单书模板 character_cases（篇章级/卷级/小说级/传记级）；验收=每档抽检 3 条",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-09-27T14:35:57.077Z"
+          "updatedAt": "2026-10-01T09:34:26.538Z"
         },
         "F82": {
           "id": "F82",
           "type": "process",
-          "name": "B3 apply 100 条 486 槽位",
-          "description": "自动备份可回滚；跑完 DB 核账覆盖数=486",
+          "name": "P2 trait_anchors 校准",
+          "description": "观测层行为事件按维度 LLM 聚类定档（3~5档自适应）→分档对照页→用户随机抽检冻结；验收=全维度过关",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-09-27T14:35:57.077Z"
+          "updatedAt": "2026-10-01T09:34:26.538Z"
         },
         "F83": {
           "id": "F83",
           "type": "process",
-          "name": "B4 三路向量回填",
-          "description": "plot_cast/char_archetype 重建（archetype_text 多出位阶/性格两段），核对块数与 chunk_idx 契约",
+          "name": "P3 入库",
+          "description": "character_cases 跨书归纳（≥2本）→cast 槽位模板（含 voice/contrast/core_conflict）+ goldfinger_refs seed + 台词库建表；验收=专名核账 0 命中",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-09-27T14:35:57.077Z"
+          "updatedAt": "2026-10-01T09:34:26.538Z"
         },
         "F84": {
           "id": "F84",
           "type": "process",
-          "name": "B5 建卡自动起草验证",
-          "description": "playwright 实测 plans.py 功能位参考非空、fillFromArchetype 两框恢复；就地更新 03 F8 行（含 100/486 修正）",
+          "name": "P4 收口",
+          "description": "三路向量回填（archetype_text 扩展版）+ plans.py 功能位参考非空 + fillFromArchetype 建卡自动起草恢复实测（playwright）",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-09-27T14:35:57.077Z"
+          "updatedAt": "2026-10-01T09:34:26.538Z"
         }
       },
       "edges": {

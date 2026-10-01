@@ -1,7 +1,7 @@
-﻿{
+{
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-09-30T16:07:27.477Z",
+  "updatedAt": "2026-10-01T09:32:38.121Z",
   "modules": {
     "0": {
       "id": "0",
@@ -658,11 +658,11 @@
           "id": "F8",
           "type": "judge",
           "name": "骨架角色槽位补全",
-          "description": "⏸ 2026-10-01 转 to_plan：用户拟升级全新模板机制——现 cast 在「概括后再概括」的骨架文本上提取（原文→逐章摘要→弧归并→跨书凝练→提角色），天然提不出立体角色；新方向从小说原文提取但消耗巨大，方向未定（讨论未落盘待口述补记），冷静期 3 天后评估。备查小修：改 prompt+validate 补位阶/性格 → 重跑 75 条（约 75 次 LLM）→ 回填三路向量；若新机制立项则小修作废勿先花钱",
+          "description": "✅ 机制设计定稿 2026-10-01（三轮讨论）：四层字段模型+六档角色阶梯+密度游程算法+LLM 批次分诊双信号定档+trait_anchors 数据聚类校准+goldfinger_refs 15字段+台词库一表双轴+真名直通/入库前匿名核账+contrast 走两级案例库。「备查小修」（改 prompt 重跑 100 条）正式作废。全文见 .flow/docs/skeleton-cast-ranks-traits.md v2.0。实施按 P0 素材底座→P1 提取器→P2 锚点校准→P3 入库→P4 向量回填与建卡恢复。",
           "location": "scripts/label_skeleton_casts.py",
-          "state": "to_plan",
+          "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-10-01T00:00:00.000Z",
+          "updatedAt": "2026-10-01T09:32:38.118Z",
           "doc": ".flow/docs/skeleton-cast-ranks-traits.md"
         },
         "F9": {
