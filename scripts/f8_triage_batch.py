@@ -46,9 +46,12 @@ def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=
     """流式调用 OpenAI 兼容网关。返回 (content, usage, elapsed)。reasoning_content 不进正文。
     429/5xx 退避重试（30/60/120s），其余异常直接抛。"""
     url = base_url.rstrip("/") + "/chat/completions"
+    # 分诊=结构化抽取，思考模式收益趋零但烧 85% token（22k~34k/批）——默认关闭
     body = json.dumps({
         "model": model, "messages": messages, "stream": True,
         "temperature": temperature, "max_tokens": max_tokens,
+        "enable_thinking": False,
+        "chat_template_kwargs": {"enable_thinking": False},
     }).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers={
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
