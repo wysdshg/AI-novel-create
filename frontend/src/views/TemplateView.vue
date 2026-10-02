@@ -2,6 +2,7 @@
   <div class="tpl-page">
     <div class="gr-subnav">
       <router-link :to="{ name: 'template' }" class="gr-tab on">情节模板库</router-link>
+      <router-link :to="{ name: 'template-char' }" class="gr-tab">人物模板库</router-link>
       <router-link :to="{ name: 'global-ref', query: { tab: 'item' } }" class="gr-tab">物品库</router-link>
       <router-link :to="{ name: 'global-ref', query: { tab: 'skill' } }" class="gr-tab">技能库</router-link>
     </div>
