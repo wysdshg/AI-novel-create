@@ -386,7 +386,7 @@
     "2": {
       "id": "2",
       "name": "F8 角色模板补齐（当前焦点）",
-      "description": "🟢 F8 角色模板机制：P0/P1/P3 ✅（凡人端到端，库内 46 条新模板现役）｜剩 P2 锚点校准 + P4 建卡恢复实测",
+      "description": "🟢 F8 角色模板机制：P0/P1/P3 ✅，**多书放量三本完成**（凡人 46 + 斗破 71 + 玄鉴 148 = 现役 265 条，三路向量齐）。**拍板（10-02）：跨书聚合模板不做**——各书档2 已聚合一次，再跨书归并会同质化，保留单书多样性。剩：P2 trait_anchors 锚点校准 + P4 fillFromArchetype playwright 实测",
       "nodes": {
         "F80": {
           "id": "F80",
@@ -432,11 +432,11 @@
           "id": "F84",
           "type": "process",
           "name": "P4 收口",
-          "description": "⏳ fillFromArchetype 恢复实测(playwright 两框非空)+多书放量(没钱修什么仙/赘婿)+03/02 对账已做 10-02",
+          "description": "🟡 大半完成：三书入库收口 ✅（凡人 46+斗破 71+玄鉴 148=265 现役，专名核账近零命中）；**拍板：跨书聚合模板不做（保留多样性）**；剩 fillFromArchetype playwright 两框非空实测",
           "location": "",
-          "state": "planned",
+          "state": "doing",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-02T09:08:00.000Z"
+          "updatedAt": "2026-10-02T11:35:00.000Z"
         }
       },
       "edges": {
