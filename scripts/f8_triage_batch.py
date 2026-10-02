@@ -41,8 +41,9 @@ def get_gateway_key():
     return json.loads(row[0]) if row[0].strip().startswith('"') else row[0]
 
 def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=8000,
-                timeout=600):
-    """流式调用 OpenAI 兼容网关。返回 (content, usage, elapsed)。reasoning_content 不进正文。"""
+                timeout=600, retries=3):
+    """流式调用 OpenAI 兼容网关。返回 (content, usage, elapsed)。reasoning_content 不进正文。
+    429/5xx 退避重试（30/60/120s），其余异常直接抛。"""
     url = base_url.rstrip("/") + "/chat/completions"
     body = json.dumps({
         "model": model, "messages": messages, "stream": True,
@@ -53,26 +54,35 @@ def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=
     })
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 直连，防系统代理劫持
     content, usage, t0 = [], None, time.time()
-    with opener.open(req, timeout=timeout) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data:"):
+    for attempt in range(retries):
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    for ch in chunk.get("choices") or []:
+                        delta = ch.get("delta") or {}
+                        # thinking/reasoning 走独立字段，永不并入正文（E10 纪律）
+                        if delta.get("content"):
+                            content.append(delta["content"])
+            return "".join(content), usage, time.time() - t0
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                wait = 30 * (attempt + 1)
+                print(f"[retry] HTTP {e.code}，{wait}s 后第 {attempt + 2} 次尝试", flush=True)
+                time.sleep(wait)
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-            for ch in chunk.get("choices") or []:
-                delta = ch.get("delta") or {}
-                # thinking/reasoning 走独立字段，永不并入正文（E10 纪律）
-                if delta.get("content"):
-                    content.append(delta["content"])
-    return "".join(content), usage, time.time() - t0
+            raise
 
 def extract_json(text):
     """剥 markdown 围栏 + 截取最外层 JSON 对象。"""
@@ -121,16 +131,32 @@ def build_user_prompt(batch, texts):
 def run_batch(batch, args, api_key, chapter_map):
     out_path = os.path.join(args.out_dir, f"batch_{batch['batch']:04d}.json")
     if os.path.exists(out_path) and not args.force:
-        return batch["batch"], "skip", None, 0.0
+        try:
+            prev = json.load(open(out_path, encoding="utf-8"))
+            if not prev.get("error"):  # parse_fail/error 批不算完成，断点重跑
+                return batch["batch"], "skip", None, 0.0
+        except Exception:  # noqa: BLE001
+            return batch["batch"], "skip", None, 0.0
     texts = []
     for chno, fn in chapter_map[batch["idx_range"][0] - 1: batch["idx_range"][1]]:
         with open(os.path.join(args.book_dir, fn), encoding="utf-8", errors="ignore") as f:
             texts.append((chno, fn, f.read()))
     messages = [{"role": "system", "content": SYS_PROMPT},
                 {"role": "user", "content": build_user_prompt(batch, texts)}]
-    content, usage, elapsed = chat_stream(
-        args.gateway, api_key, args.model, messages,
-        temperature=args.temperature, max_tokens=args.max_tokens)
+    try:
+        content, usage, elapsed = chat_stream(
+            args.gateway, api_key, args.model, messages,
+            temperature=args.temperature, max_tokens=args.max_tokens)
+    except Exception as e:  # noqa: BLE001 —— 单批网络/网关异常不炸全场，留待断点重跑
+        data = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+        data["_meta"] = {
+            "batch": batch["batch"], "idx_range": batch["idx_range"], "chapters": batch["chapters"],
+            "model": args.model, "elapsed_s": 0.0, "usage": None,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        return batch["batch"], "error", data, 0.0
     try:
         data = extract_json(content)
         status = "ok"
