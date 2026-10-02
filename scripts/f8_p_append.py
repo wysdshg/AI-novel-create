@@ -167,10 +167,12 @@ def main():
         t, g = v["tpl"], v["grade"]
         ranks = t.get("ranks")
         ranks = [ranks] if isinstance(ranks, str) and ranks.strip() else (ranks or [])
+        # 🔴 traits 键名归一化（聚合 LLM 可能输出中文标签），统一 12 维英文键入库
+        ins_traits, _ = normalize_traits(t.get("traits"))
         item = {
             "slot": t.get("slot") or "角色", "desc": t.get("desc") or "",
             "mode": t.get("mode") or "", "ranks": ranks,
-            "traits": t.get("traits") or {}, "trait_basis": t.get("trait_basis") or {},
+            "traits": ins_traits, "trait_basis": t.get("trait_basis") or {},
             "voice": t.get("voice") or {}, "behavior_patterns": t.get("behavior_patterns") or [],
             "relation_patterns": t.get("relation_patterns") or [],
             "slot_kind": "person", "beats": [], "srcs": [],
