@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """F8 模板画廊渲染：tpl_*.json → templates_gallery.html（档5~3 全字段卡，档2~1 紧凑卡）"""
+import argparse
 import glob
 import html
 import json
@@ -7,9 +8,6 @@ import os
 from datetime import datetime
 
 GRADE_NAME = {5: "全书级/主角", 4: "小说级", 3: "卷级", 2: "篇章级", 1: "断续配角"}
-AGG = r"E:\AI小说创作\outputs\f8_p0\aggregate_final\aggregate.json"
-TPL_DIR = r"E:\AI小说创作\outputs\f8_p0\templates"
-OUT = r"E:\AI小说创作\outputs\f8_p0\templates\templates_gallery.html"
 
 TRAIT_LABEL = {"altruism": "利他↔自私", "honor": "信义↔背信", "mercy": "仁慈↔狠辣",
                "resolve": "坚毅↔易摧", "decisiveness": "果决↔犹豫", "discipline": "自律↔放纵",
@@ -64,6 +62,15 @@ def compact_card(nm, t, meta):
             f'<span style="color:#374151">{html.escape(str(t.get("desc",""))[:90])}</span><br>'
             f'<span style="color:#6b7280">{traits}</span><br><span style="color:#9ca3af">{pats}</span></div>')
 
+ap = argparse.ArgumentParser(description="F8 模板画廊渲染")
+ap.add_argument("--aggregate", default=r"E:\AI小说创作\outputs\f8_p0\aggregate_final\aggregate.json")
+ap.add_argument("--tpl-dir", default=r"E:\AI小说创作\outputs\f8_p0\templates")
+ap.add_argument("--out", default=None, help="输出 HTML（缺省= tpl-dir/templates_gallery.html）")
+ap.add_argument("--book-label", default="凡人修仙传")
+args = ap.parse_args()
+AGG, TPL_DIR = args.aggregate, args.tpl_dir
+OUT = args.out or os.path.join(TPL_DIR, "templates_gallery.html")
+
 agg = json.load(open(AGG, encoding="utf-8"))
 meta = {r["name"]: {"total_on": r["total_on"], "grade": r["final_grade"]} for r in agg["rows"]}
 tpls = {}
@@ -96,7 +103,7 @@ for g in range(5, 0, -1):
 
 page = f'''<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>F8 模板画廊</title></head>
 <body style="font-family:'Microsoft YaHei',sans-serif;background:#f3f4f6;margin:0;padding:22px;max-width:940px;margin:0 auto">
-<h1 style="font-size:20px">F8 角色模板画廊 <span style="font-size:13px;color:#6b7280;font-weight:400">凡人修仙传｜档5~3 全字段｜档2~1 紧凑｜误命中候选未建</span></h1>
+<h1 style="font-size:20px">F8 角色模板画廊 <span style="font-size:13px;color:#6b7280;font-weight:400">{html.escape(args.book_label)}｜档5~3 全字段｜档2~1 紧凑｜误命中候选未建</span></h1>
 <p style="color:#6b7280;font-size:12px">traits=±10 刻度 12 维（D2 冻结）｜样本指针不存原文（合规）｜core_conflict/contrast 待 P2 案例库｜生成于 {datetime.now():%m-%d %H:%M}</p>
 {''.join(sections)}
 </body></html>'''

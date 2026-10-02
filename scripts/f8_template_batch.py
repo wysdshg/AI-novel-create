@@ -121,6 +121,7 @@ def main():
     ap.add_argument("--model", default="qwen3.8-flash-next")
     ap.add_argument("--batch-sizes", default="5:1,4:3,3:4,2:6,1:10")
     ap.add_argument("--grades", default="5,4,3,2,1", help="要跑的档位（自上而下）")
+    ap.add_argument("--include", default="", help="强制建模板的角色（逗号分隔，盖过 QA 跳过）")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--force", action="store_true")
@@ -130,7 +131,13 @@ def main():
     agg = json.load(open(args.aggregate, encoding="utf-8"))
     dmap = {r["name"]: r for r in json.load(open(args.density, encoding="utf-8"))["results"]}
     rows = agg["rows"]
-    skip_qa = {r["name"] for r in rows if r.get("qa")}
+    # QA 跳过口径（2026-10-02 斗破教训）：花名册内角色（密度 results）即使被 QA 旗标
+    # （多为「被提及≠在场」的 mention 膨胀）也照常建模板——行为摘要来自分诊真观测；
+    # 只有分诊新发现的可疑名（通用词/生物群）才跳过。--include 可强制点名。
+    roster_names = set(dmap.keys())
+    include = {x.strip() for x in args.include.split(",") if x.strip()}
+    skip_qa = {r["name"] for r in rows if r.get("qa")
+               and r["name"] not in roster_names and r["name"] not in include}
     bs_map = {int(k): int(v) for k, v in (p.split(":") for p in args.batch_sizes.split(","))}
     grades = [int(g) for g in args.grades.split(",")]
 
