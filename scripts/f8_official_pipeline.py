@@ -186,9 +186,27 @@ def trait_bar(name, val):
             f'<span style="width:96px;color:#374151">{TRAIT_LABEL[name]}</span>{bar}'
             f'<span style="width:30px;text-align:right;font-weight:600">{val:+d}</span></div>')
 
+LABEL2KEY = {v: k for k, v in TRAIT_LABEL.items()}
+
+def normalize_traits(traits):
+    """聚合 LLM 可能用中文标签当 traits 键（甚至自造维度）→ 归一化成 12 维英文键。"""
+    out, dropped = {}, []
+    for k, v in (traits or {}).items():
+        key = LABEL2KEY.get(k.strip(), k.strip())
+        if key not in TRAIT_LABEL:
+            dropped.append(k)
+            continue
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            dropped.append(k)
+            continue
+        out[key] = max(-10, min(10, v))
+    return out, dropped
+
 def card(title, t, issues, badge_label, badge_color):
     traits = t.get("traits", {})
-    bars = "".join(trait_bar(k, traits.get(k, 0)) for k in TRAIT_LABEL if traits.get(k))
+    bars = "".join(trait_bar(k, traits.get(k, 0)) for k in TRAIT_LABEL)
     basis = t.get("trait_basis", {})
     basis_html = "".join(f'<li><b>{TRAIT_LABEL.get(k, k)}</b>：{html.escape(str(v))}</li>' for k, v in basis.items())
     v = t.get("voice", {})
@@ -242,8 +260,17 @@ def main():
         for p in sorted(glob.glob(os.path.join(args.out_dir, "agg_*.json"))):
             t = json.load(open(p, encoding="utf-8"))
             m = t.pop("_meta", {})
-            clusters.append((t.get("slot") or os.path.basename(p), t, m.get("issues", [])))
-            results.append((t.get("slot") or os.path.basename(p), 2, t, m.get("issues", [])))
+            # 键名归一化（中文标签→英文维度），自造维度剔除并记 issue
+            fixed, dropped = normalize_traits(t.get("traits"))
+            t["traits"] = fixed
+            issues = list(m.get("issues", []))
+            if dropped:
+                issues.append(f"剔除自造维度: {dropped}")
+                m["issues"] = issues
+                t["_meta"] = m
+                json.dump(t, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            clusters.append((t.get("slot") or os.path.basename(p), t, issues))
+            results.append((t.get("slot") or os.path.basename(p), 2, t, issues))
         _render(results, clusters, args.out_dir, meta)
         return
 
