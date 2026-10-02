@@ -27,7 +27,9 @@ GENERIC = {"少主", "长老", "门主", "堂主", "护法", "前辈", "道友",
            "魔头", "妖女", "圣祖", "使者", "公子爷", "大姐", "小子", "族长", "老家伙",
            "师公", "院长", "神秘人", "副院长", "副堂主", "阁主", "副阁主", "谷主", "宗主",
            "殿主", "统领", "都统", "大长老", "太上长老", "导师", "老者", "少女", "少妇",
-           "盟主", "教主", "岛主", "城主", "家主", "副盟主", "香主", "舵主"}
+           "盟主", "教主", "岛主", "城主", "家主", "副盟主", "香主", "舵主",
+           "峰主", "掌门", "兄长", "少年", "遗孤", "族正", "母亲", "父亲",
+           "少族长", "道人", "王子", "金甲男子", "元商", "叔父", "伯父", "箓气", "仙基"}
 
 def chat_once(prompt, api_key, base_url, model, max_tokens=4000):
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}],
@@ -69,6 +71,7 @@ def main():
     ap.add_argument("--report", required=True)
     ap.add_argument("--gateway", default="http://127.0.0.1:9377/v1")
     ap.add_argument("--model", default="qwen3.8-flash-next")
+    ap.add_argument("--api-key", default="", help="直连供应商 key（缺省读 llm.gateway_key）")
     ap.add_argument("--db-backup-dir", default=os.path.join(PROJ, "outputs", "_backup"))
     args = ap.parse_args()
 
@@ -116,7 +119,7 @@ def main():
         items.append({"key": key, "slot": t.get("slot"), "mode": t.get("mode"),
                       "desc": (t.get("desc") or "")[:80],
                       "top": [f"{k}{val:+d}" for k, val in top]})
-    api_key = gw_key()
+    api_key = args.api_key or gw_key()
     names_map = {}
     try:
         content = chat_once(
