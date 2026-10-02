@@ -658,11 +658,11 @@
           "id": "F8",
           "type": "judge",
           "name": "骨架角色槽位补全",
-          "description": "✅ 机制设计定稿 2026-10-01（三轮讨论）：四层字段模型+六档角色阶梯+密度游程算法+LLM 批次分诊双信号定档+trait_anchors 数据聚类校准+goldfinger_refs 15字段+台词库一表双轴+真名直通/入库前匿名核账+contrast 走两级案例库。「备查小修」（改 prompt 重跑 100 条）正式作废。全文见 .flow/docs/skeleton-cast-ranks-traits.md v2.0。实施按 P0 素材底座→P1 提取器→P2 锚点校准→P3 入库→P4 向量回填与建卡恢复。",
+          "description": "🟢 P0~P3 ✅ 2026-10-02（凡人修仙传端到端）：①密度游程+Flash-Next 分诊 98 批+聚合双信号定档 731 角色（泛称黑名单+防串门两轮修）②358 模板草稿按档分批合成 ③官方化：档5~3 匿名化 36（块名单核账）+档2 聚合 11 ④P3 换血：旧 100 条归档可回滚+新 46 条 character 模板入库（三路向量 138 块，archetype_text「位阶/性格」两段恢复，专名核账 0 命中，search 冒烟命中）。拍板：arc_stance_curve 移出模板/relation_patterns=A 对类不对人/聚合模板 traits 全 12 维。剩 P2 trait_anchors 锚点校准 + P4 fillFromArchetype playwright 实测。产物 outputs/f8_p0/，脚本 scripts/f8_*.py",
           "location": "scripts/label_skeleton_casts.py",
-          "state": "planned",
+          "state": "doing",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-10-01T09:32:38.118Z",
+          "updatedAt": "2026-10-02T09:05:00.000Z",
           "doc": ".flow/docs/skeleton-cast-ranks-traits.md"
         },
         "F9": {

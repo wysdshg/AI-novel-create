@@ -386,57 +386,57 @@
     "2": {
       "id": "2",
       "name": "F8 角色模板补齐（当前焦点）",
-      "description": "",
+      "description": "🟢 F8 角色模板机制：P0/P1/P3 ✅（凡人端到端，库内 46 条新模板现役）｜剩 P2 锚点校准 + P4 建卡恢复实测",
       "nodes": {
         "F80": {
           "id": "F80",
           "type": "process",
           "name": "P0 素材底座",
-          "description": "出场密度统计脚本（间隔容忍游程合并）+每书别称表+Flash-Next 批次分诊（20~30章/批）跑通 2~3 本书（建议没钱修什么仙+凡人+群像文赘婿）；验收=分档清单人工抽检",
+          "description": "✅ 2026-10-02：知乎花名册78人+密度游程(f8_density_stats)+分诊98批(f8_triage_batch)+聚合定档731角色(f8_triage_aggregate,泛称黑名单+防串门)；抽检样张+对照页齐",
           "location": "",
-          "state": "planned",
+          "state": "done",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-01T09:34:26.536Z"
+          "updatedAt": "2026-10-02T09:08:00.000Z"
         },
         "F81": {
           "id": "F81",
           "type": "process",
           "name": "P1 提取器",
-          "description": "按档提取：观测层（真名主键+证据指针）→聚合→单书模板 character_cases（篇章级/卷级/小说级/传记级）；验收=每档抽检 3 条",
+          "description": "✅ 2026-10-02：358 模板草稿按档分批合成(f8_template_batch,5:1/4:3/3:4/2:6/1:10)；档5~3 全字段 36+档2 紧凑 100+档1 222",
           "location": "",
-          "state": "planned",
+          "state": "done",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-01T09:34:26.538Z"
+          "updatedAt": "2026-10-02T09:08:00.000Z"
         },
         "F82": {
           "id": "F82",
           "type": "process",
           "name": "P2 trait_anchors 校准",
-          "description": "观测层行为事件按维度 LLM 聚类定档（3~5档自适应）→分档对照页→用户随机抽检冻结；验收=全维度过关",
+          "description": "⏳ traits 当前=LLM 直判未经 BARS 校准；需观测层行为事件→聚类定档→分档对照页用户抽检冻结",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-01T09:34:26.538Z"
+          "updatedAt": "2026-10-02T09:08:00.000Z"
         },
         "F83": {
           "id": "F83",
           "type": "process",
           "name": "P3 入库",
-          "description": "character_cases 跨书归纳（≥2本）→cast 槽位模板（含 voice/contrast/core_conflict）+ goldfinger_refs seed + 台词库建表；验收=专名核账 0 命中",
+          "description": "✅ 2026-10-02：官方化(f8_official_pipeline)档5~3匿名化36(块名单核账0命中)+档2聚合11功能模板；f8_p3_swap 换血：旧100条归档可回滚(DB备份outputs/_backup/)+新46条character入库(三路向量138块,archetype_text位阶/性格两段恢复,search冒烟命中)",
           "location": "",
-          "state": "planned",
+          "state": "done",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-01T09:34:26.538Z"
+          "updatedAt": "2026-10-02T09:08:00.000Z"
         },
         "F84": {
           "id": "F84",
           "type": "process",
           "name": "P4 收口",
-          "description": "三路向量回填（archetype_text 扩展版）+ plans.py 功能位参考非空 + fillFromArchetype 建卡自动起草恢复实测（playwright）",
+          "description": "⏳ fillFromArchetype 恢复实测(playwright 两框非空)+多书放量(没钱修什么仙/赘婿)+03/02 对账已做 10-02",
           "location": "",
           "state": "planned",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-01T09:34:26.538Z"
+          "updatedAt": "2026-10-02T09:08:00.000Z"
         }
       },
       "edges": {

@@ -5,6 +5,10 @@
 
 ---
 
+## 2026-10-02
+
+- **F8 新角色模板机制 P0~P3 ✅（凡人修仙传端到端，库内换血完成）**。P0：知乎人物志花名册 78 人 + 密度游程脚本 + Flash-Next 分诊 98 批（断点续跑/流式/MyAPI）+ 聚合双信号定档 **731 角色**（泛称黑名单+别称防串门两轮修，血光/儒生等误命中 QA 旗标）。P1：358 个模板草稿按档分批合成（5:1/4:3/3:4/2:6/1:10）。P3 预演+入库：档5~3 匿名化 36（去角色名/专有名+块名单 grep 核账）+ 档2 聚合 100→11 功能模板 + traits 键名归一化修复 → **用户拍板后换血**：旧 100 条 active 归档（`--unarchive` 可回滚，DB 备份 outputs/_backup/），新 46 条 character 模板入库（三路向量 138 块、**archetype_text「位阶/性格」两段恢复**=建卡起草病根治愈、专名核账 0 命中、search 冒烟命中「谨慎自保型主角」）。用户拍板：arc_stance_curve 移出模板、relation_patterns=A 对类不对人、聚合模板 traits 全 12 维保留。新脚本 7 个（f8_density_stats/f8_triage_batch/f8_triage_aggregate/f8_template_poc/f8_template_batch/f8_official_pipeline/f8_p3_swap）。**剩 P2 锚点校准 + P4 fillFromArchetype playwright 实测**（03/02 已同步）。
+
 ## 2026-10-01
 
 - **F8 机制设计定稿 🔵：新角色模板机制 v2.0（`.flow/docs/skeleton-cast-ranks-traits.md` 全文重写）**。病根=cast 在「概括后再概括」文本上提取提不出立体角色；定稿：四层字段模型补齐 L4（voice/behavior_patterns/arc_stance_curve/relation_hooks/contrast/core_conflict/slot_kind）+ 六档角色阶梯（出场密度游程算法+LLM 批次分诊双信号）+ trait_anchors 数据聚类校准（用户抽检分档对照页）+ goldfinger_refs 机制库 15 字段（含金手指类型学调研）+ 台词库一表双轴 + 观测层真名直通/入库前匿名核账 + contrast 名角色案例库两级。**「备查小修」（改 prompt 重跑 100 条）正式作废**。flow 图 F8 → planned；docs/03 F8/C1b 行同步。实施待排：P0 素材底座（密度统计+分诊，先跑 2~3 本书，建议没钱修什么仙+凡人+群像文赘婿）。
