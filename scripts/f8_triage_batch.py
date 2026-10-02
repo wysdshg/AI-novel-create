@@ -17,6 +17,7 @@ F8 P0 ② Flash-Next 批次分诊脚本（机制文档 §4.3 第一层批内分�
 import argparse
 import json
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -41,7 +42,7 @@ def get_gateway_key():
     return json.loads(row[0]) if row[0].strip().startswith('"') else row[0]
 
 def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=8000,
-                timeout=600, retries=3):
+                timeout=600, retries=5):
     """流式调用 OpenAI 兼容网关。返回 (content, usage, elapsed)。reasoning_content 不进正文。
     429/5xx 退避重试（30/60/120s），其余异常直接抛。"""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -78,7 +79,7 @@ def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=
             return "".join(content), usage, time.time() - t0
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                wait = 30 * (attempt + 1)
+                wait = 30 * (2 ** attempt) + random.randint(0, 20)  # 抖动防并发重试扎堆
                 print(f"[retry] HTTP {e.code}，{wait}s 后第 {attempt + 2} 次尝试", flush=True)
                 time.sleep(wait)
                 continue
@@ -216,7 +217,7 @@ def main():
 
     print(f"批次 {len(batches)} 个｜模型 {args.model}｜并发 {args.concurrency}", flush=True)
     t0 = time.time()
-    stats = {"ok": 0, "parse_fail": 0, "skip": 0}
+    stats = {"ok": 0, "parse_fail": 0, "skip": 0, "error": 0}
     if args.concurrency <= 1:
         for b in batches:
             no, status, data, el = run_batch(b, args, api_key, chapter_map)
