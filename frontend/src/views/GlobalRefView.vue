@@ -3,6 +3,7 @@
     <!-- 子导航：与情节模板库同层的三个库（唯一的 tab 层，勿再加 el-tabs） -->
     <div class="gr-subnav">
       <router-link :to="{ name: 'template' }" class="gr-tab">情节模板库</router-link>
+      <router-link :to="{ name: 'template-char' }" class="gr-tab">人物模板库</router-link>
       <router-link :to="{ name: 'global-ref', query: { tab: 'item' } }"
                    class="gr-tab" :class="{ on: active === 'item' }">物品库</router-link>
       <router-link :to="{ name: 'global-ref', query: { tab: 'skill' } }"
