@@ -13,10 +13,12 @@ import argparse
 import glob
 import json
 import os
+import random
 import re
 import sqlite3
 import sys
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -30,29 +32,49 @@ def get_gateway_key():
     con.close()
     return json.loads(row[0]) if row[0].strip().startswith('"') else row[0]
 
-def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=16000, timeout=900):
+def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=16000,
+                timeout=900, retries=5):
+    """流式调用（含分诊同款防弹：429/5xx/连接重置 退避重试 + 思考默认关闭）。"""
     body = json.dumps({"model": model, "messages": messages, "stream": True,
-                       "temperature": temperature, "max_tokens": max_tokens}).encode("utf-8")
+                       "temperature": temperature, "max_tokens": max_tokens,
+                       "enable_thinking": False,
+                       "chat_template_kwargs": {"enable_thinking": False}}).encode("utf-8")
     req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers={
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     content, t0 = [], time.time()
-    with opener.open(req, timeout=timeout) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data:"):
+    for attempt in range(retries):
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    for ch in chunk.get("choices") or []:
+                        if (ch.get("delta") or {}).get("content"):
+                            content.append(ch["delta"]["content"])
+            return "".join(content), time.time() - t0
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                wait = 30 * (2 ** attempt) + random.randint(0, 20)
+                print(f"[retry] HTTP {e.code}，{wait}s 后第 {attempt + 2} 次尝试", flush=True)
+                time.sleep(wait)
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
+            raise
+        except (ConnectionResetError, TimeoutError, OSError) as e:
+            if attempt < retries - 1:
+                wait = 15 * (2 ** attempt) + random.randint(0, 10)
+                print(f"[retry] {type(e).__name__}，{wait}s 后第 {attempt + 2} 次尝试", flush=True)
+                time.sleep(wait)
                 continue
-            for ch in chunk.get("choices") or []:
-                if (ch.get("delta") or {}).get("content"):
-                    content.append(ch["delta"]["content"])
-    return "".join(content), time.time() - t0
+            raise
 
 def extract_json(text):
     text = re.sub(r"```(?:json)?", "", text).strip()
@@ -78,7 +100,7 @@ def build_user_prompt(batch_rows, dmap, chapter_map, book_dir, quote_grades=(4, 
     for r in batch_rows:
         nm = r["name"]
         d = dmap.get(nm, {})
-        L = [f"===== 角色：{nm}（密度预判档{r['final_grade']}）====="]
+        L = [f"===== 角色：{nm} ====="]
         L.append(f"【密度】出场{r['total_on']}章/覆盖率{r['coverage']:.1%}，有效段 "
                  + "、".join(f"{s['start']}~{s['end']}" for s in (r.get("eff_segs") or [])[:8]))
         if r.get("aliases"):
@@ -189,9 +211,11 @@ def main():
             return g, [f"解析失败: {e} -> {os.path.basename(raw)}"], el
         got = data.get("templates", [])
         for t in got:
-            nm = t.get("name", "").strip()
+            # 名字容错：模型可能把提示词头部的括号注记一起抄进 name（萧炎（密度预判档5））
+            nm = re.sub(r"（[^）]*）$", "", (t.get("name") or "").strip()).strip()
             if not nm:
                 continue
+            t["name"] = nm
             t["grade"] = g
             t["_meta"] = {"generated_at": datetime.now().isoformat(timespec="seconds"),
                           "model": args.model, "batch_chars": len(rows_b)}
