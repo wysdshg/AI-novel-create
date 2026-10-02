@@ -185,6 +185,7 @@ def main():
     ap.add_argument("--batches", default="", help="批号，如 1-4 或 1,3,5；空=全部")
     ap.add_argument("--gateway", default=GATEWAY_DEFAULT)
     ap.add_argument("--model", default="qwen3.8-flash-next")
+    ap.add_argument("--api-key", default="", help="直连供应商时显式传 key（缺省读 app_configs llm.gateway_key）")
     ap.add_argument("--temperature", type=float, default=0.2)
     ap.add_argument("--max-tokens", type=int, default=8000)
     ap.add_argument("--concurrency", type=int, default=1)
@@ -207,7 +208,7 @@ def main():
     if not batches:
         sys.exit("无匹配批次")
 
-    api_key = get_gateway_key()
+    api_key = args.api_key or get_gateway_key()
     # 章号→文件映射（与密度脚本同一自然排序）
     chapter_map = []
     for fn in sorted(os.listdir(args.book_dir)):

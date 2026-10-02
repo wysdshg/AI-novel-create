@@ -301,9 +301,9 @@ def main():
     json_path = os.path.join(args.out_dir, "aggregate.json")
     json.dump(payload, open(json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=list)
 
-    L = [f"# F8 全书分档清单（凡人修仙传）", "",
+    L = [f"# F8 全书分档清单（{os.path.basename(args.book_dir)}）", "",
          f"- 批次覆盖：{payload['n_batches_used']} 批｜花名册 {len(names_lines)} 人"
-         f"（密度 78 + 补漏 {len(keep_new)} − 归并 {len(merged_into)}）",
+         f"（密度 {len(density['results'])} + 补漏 {len(keep_new)} − 归并 {len(merged_into)}）",
          f"- 异名归并（自动）：{'；'.join(merge_notes) if merge_notes else '无'}",
          f"- 归并提案（花名册间，待拍板）：{'；'.join(proposals) if proposals else '无'}", ""]
     dist = defaultdict(int)
