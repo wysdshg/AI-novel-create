@@ -244,6 +244,8 @@ def main():
     ap.add_argument("--model", default="qwen3.8-flash-next")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--render-only", action="store_true", help="跳过 LLM，从已落盘 JSON 直接渲染")
+    ap.add_argument("--book", default="凡人修仙传", help="书名（进 source_stats 与页面标题）")
+    ap.add_argument("--proper-nouns", default="", help="专名黑名单文件（每行一词；缺省用内嵌凡人表）")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -271,15 +273,20 @@ def main():
                 json.dump(t, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
             clusters.append((t.get("slot") or os.path.basename(p), t, issues))
             results.append((t.get("slot") or os.path.basename(p), 2, t, issues))
-        _render(results, clusters, args.out_dir, meta)
+        _render(results, clusters, args.out_dir, meta, args.book)
         return
 
     api_key = get_gateway_key()
 
     agg = json.load(open(args.aggregate, encoding="utf-8"))
     meta = {r["name"]: r for r in agg["rows"]}
-    # 块名单 = 花名册姓名+别称 + 专有名词
-    blocklist = set(PROPER_NOUNS)
+    # 块名单 = 花名册姓名+别称 + 专有名词（--proper-nouns 文件优先，缺省内嵌凡人表）
+    if args.proper_nouns:
+        pn = [l.strip() for l in open(args.proper_nouns, encoding="utf-8")
+              if l.strip() and not l.startswith("#")]
+    else:
+        pn = PROPER_NOUNS
+    blocklist = set(pn)
     for r in agg["rows"]:
         blocklist.add(r["name"])
         blocklist.update(r.get("aliases") or [])
@@ -322,9 +329,9 @@ def main():
         print(f"{nm} ✓" if not issues else f"{nm} ⚠ {issues}", flush=True)
 
     # ③ 渲染
-    _render(results, clusters, args.out_dir, meta)
+    _render(results, clusters, args.out_dir, meta, args.book)
 
-def _render(results, clusters, out_dir, meta):
+def _render(results, clusters, out_dir, meta, book_label="凡人修仙传"):
     by_g = {g: [] for g in (5, 4, 3, 2)}
     for nm, g, t, issues in results:
         by_g[g].append((nm, t, issues))
@@ -344,7 +351,7 @@ def _render(results, clusters, out_dir, meta):
     n_ok = sum(1 for _, _, _, iss in results if not iss)
     page = f'''<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>F8 官方模板预览（已脱敏）</title></head>
 <body style="font-family:'Microsoft YaHei',sans-serif;background:#f3f4f6;margin:0;padding:22px;max-width:940px;margin:0 auto">
-<h1 style="font-size:20px">F8 官方模板预览 <span style="font-size:13px;color:#6b7280;font-weight:400">已去角色名/小说专有名｜此页拍板后才写库</span></h1>
+<h1 style="font-size:20px">F8 官方模板预览·{html.escape(book_label)} <span style="font-size:13px;color:#6b7280;font-weight:400">已去角色名/小说专有名｜此页拍板后才写库</span></h1>
 <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 14px;font-size:13px;color:#065f46;margin:8px 0">
 共 {n_all} 个模板（档5~3 原样脱敏 {n_all - len(clusters)} + 档2 聚合 {len(clusters)}）｜专名核账 <b>{n_ok}/{n_all} 零命中</b></div>
 {''.join(sections)}
