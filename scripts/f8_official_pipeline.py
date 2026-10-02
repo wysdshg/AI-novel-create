@@ -52,9 +52,11 @@ def get_gateway_key():
     con.close()
     return json.loads(row[0]) if row[0].strip().startswith('"') else row[0]
 
-def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=8000, timeout=600):
+def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=8000, timeout=600, think=True):
     body = json.dumps({"model": model, "messages": messages, "stream": True,
-                       "temperature": temperature, "max_tokens": max_tokens}).encode("utf-8")
+                       "temperature": temperature, "max_tokens": max_tokens,
+                       "enable_thinking": think,
+                       "chat_template_kwargs": {"enable_thinking": think}}).encode("utf-8")
     req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=body, headers={
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -100,7 +102,7 @@ def anonymize(tpl, name, api_key, args, blocklist):
                 {"role": "user", "content": f"角色名（要去掉的）：{name}\n模板 JSON：\n"
                                             + json.dumps(tpl, ensure_ascii=False)}]
     for attempt in (1, 2):
-        content, el = chat_stream(args.gateway, api_key, args.model, messages,
+        content, el = chat_stream(args.gateway, api_key, args.model, messages, think=False,
                                   max_tokens=8000)
         try:
             out = extract_json(content)
