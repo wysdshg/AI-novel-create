@@ -92,26 +92,32 @@ def get_planned_char_archetypes(project_id: str, article_id: str, pc_id: str,
 
     items: list[dict] = []
     try:
+        # 🔴 归档过滤（2026-10-02）：search_similar 是底层 KNN，不看模板状态——
+        # 池子里躺着已归档旧模板的块（P3 换血后尤其明显），建卡弹窗会召回
+        # 「没有位阶/性格的鬼卡」。多取再按状态过滤，凑满 3 张有效卡为止。
         hits = vector_index.search_similar(
-            db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_ARCHETYPE, query, top_k=3)
+            db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_ARCHETYPE, query, top_k=12)
         for h in hits:
+            if len(items) >= 3:
+                break
             text = getattr(h, "chunk_text", None) or (h.get("chunk_text") if isinstance(h, dict) else "")
             score = getattr(h, "score", None) or (h.get("score") if isinstance(h, dict) else None)
             src_id = getattr(h, "source_id", None) or (h.get("source_id") if isinstance(h, dict) else None)
             if not text:
                 continue
             trow = db.query(PlotTemplateORM).filter_by(id=src_id).first() if src_id else None
+            if trow is None or (trow.status or "") == "archived":
+                continue  # 孤儿块 / 已归档模板（旧向量残留）不进参考卡
+            # chunk_text == archetype_text(cate)（确定性）→ 反查结构化槽位
             ref = None
-            if trow is not None:
-                # chunk_text == archetype_text(cate)（确定性）→ 反查结构化槽位
-                for c in tpl_crud.structure_casts(trow):
-                    if tpl_crud.archetype_text(c) == text:
-                        ref = {"slot": c.get("slot"),
-                               "desc": (c.get("desc") or "")[:60],
-                               "mode": c.get("mode"),
-                               "ranks": c.get("ranks") or [],
-                               "traits": c.get("traits") or {}}
-                        break
+            for c in tpl_crud.structure_casts(trow):
+                if tpl_crud.archetype_text(c) == text:
+                    ref = {"slot": c.get("slot"),
+                           "desc": (c.get("desc") or "")[:60],
+                           "mode": c.get("mode"),
+                           "ranks": c.get("ranks") or [],
+                           "traits": c.get("traits") or {}}
+                    break
             items.append({"text": text[:80],
                           "score": round(float(score), 3) if score else None,
                           "template": trow.name if trow else None,
