@@ -140,8 +140,9 @@ def main():
     api_key = json.loads(sqlite3.connect(f"file:{os.path.expanduser(r'~\.ai_novel\data\novel_agent.db')}?mode=ro", uri=True)
                          .execute("SELECT value FROM app_configs WHERE key='llm.gateway_key'").fetchone()[0])
     naming_prompt = ("下面是 JSON 数组，每项是一条角色功能模板的功能信息。给每条起一个「模板名」：≤10 字、"
-                     "体现功能位与性格气质（如：隐忍算计型主角、护短冲动型挚友）、禁止任何人名/书名/门派名等专名、"
-                     "彼此不重名。输出严格 JSON：{\"names\":[{\"key\":\"原key原样\",\"name\":\"模板名\"}]}，"
+                     "彼此不重名、禁止任何人名/书名/门派名等专名。"
+                     "命名公式：【两三个性格/行事词】+ 型 + 【功能位或关系称谓】。金标准示例（凡人修仙传实测用户好评）：\n- 热络谨慎型前辈（议事引路的事务型前辈，热络+谨慎）\n- 化身引路型师友（陪练化身的师友，兼具指路、磨砺）\n- 重情急躁型少侠（重情+急躁的少侠）\n- 利诱分宝型宿敌（以利诱分宝拉拢同行的宿敌）\n- 果决护族型圣女、狠辣围杀型阻碍、冷傲亦敌型妖友\n反例（禁止）：少年复仇、冷酷掌权、宗子执行、成长经营——这些是**情节概括/身份标签**，看不出性格与相处方式，不是模板名。名字要让作者一眼看出「这是个什么性子的人、和主角怎么相处」。\n"
+                     "输出严格 JSON：{\"names\":[{\"key\":\"原key原样\",\"name\":\"模板名\"}]}，"
                      "必须覆盖全部 " + str(len(items)) + " 条。\n\n"
                      + json.dumps(items, ensure_ascii=False))
     names_map = {}
