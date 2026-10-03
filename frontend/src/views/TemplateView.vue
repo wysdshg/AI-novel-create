@@ -37,9 +37,11 @@
       <el-select v-model="scaleFilter" placeholder="粒度" clearable style="width: 110px" @change="loadList">
         <el-option label="故事弧" value="arc" />
         <el-option label="情节段" value="segment" />
+        <el-option label="角色模板" value="character" />
       </el-select>
 
       <el-select v-model="statusFilter" placeholder="状态" clearable style="width: 120px" @change="loadList">
+        <el-option label="现役" value="active" />
         <el-option label="已审阅" value="reviewed" />
         <el-option label="草稿" value="draft" />
         <el-option label="已归档" value="archived" />
@@ -124,14 +126,14 @@
         </div>
 
         <div class="tp-meta">
-          <span class="tp-chip">{{ t.scale === 'arc' ? '故事弧' : '情节段' }}</span>
+          <span class="tp-chip">{{ scaleText(t.scale) }}</span>
           <span class="tp-chip">{{ (t.structure?.phases || []).length }} 阶段</span>
           <span class="tp-chip">{{ beatCount(t) }} 节拍</span>
           <span class="tp-chip">{{ (t.structure?.cast || []).length }} 角色位</span>
         </div>
 
         <div class="tp-src">
-          来源：{{ (t.source_stats?.book_names || []).join('、') || '—' }}
+          来源：{{ srcBooks(t).join('、') || '—' }}
           <span v-if="t.source_stats?.books" class="tp-arcs">（{{ t.source_stats.books }} 书）</span>
         </div>
 
@@ -181,7 +183,7 @@
             {{ statusText(detail.status) }}
           </el-tag>
           <el-tag size="small" effect="plain" type="info">
-            {{ detail.scale === 'arc' ? '故事弧' : '情节段' }}
+            {{ scaleText(detail.scale) }}
           </el-tag>
           <el-tag v-for="g in detail.genre_tags || []" :key="g" size="small" effect="plain">
             {{ g }}
@@ -287,8 +289,11 @@ const list = ref([])
 const total = ref(0)
 
 const keyword = ref('')
-const scaleFilter = ref('')
-const statusFilter = ref('')
+// DEV-F9a（2026-10-03）：默认「故事弧 + 现役」。F8 把 265 条角色模板
+// （scale=character，与骨架同表）放进了同一张表，不给默认过滤就全量混显。
+// 两个下拉都 clearable，作者清空即回到全量考古视图。
+const scaleFilter = ref('arc')
+const statusFilter = ref('active')
 const tagFilter = ref('')
 const isSearchMode = ref(false)
 const searchMode = ref('')
@@ -302,14 +307,14 @@ const selected = ref([])          // 选中的模板 id（数组比 Set 更好�
 
 const allBooks = computed(() => {
   const s = new Set()
-  for (const t of list.value) for (const b of t.source_stats?.book_names || []) s.add(b)
+  for (const t of list.value) for (const b of srcBooks(t)) s.add(b)
   return [...s].sort()
 })
 
 // 展示集 = 列表（服务端已按 scale/status/tag 过滤）再按来源书**客户端**过滤
 const shown = computed(() =>
   bookFilter.value
-    ? list.value.filter((t) => (t.source_stats?.book_names || []).includes(bookFilter.value))
+    ? list.value.filter((t) => srcBooks(t).includes(bookFilter.value))
     : list.value)
 
 const allVisibleSelected = computed(() =>
@@ -362,7 +367,23 @@ function statusType(s) {
   return s === 'reviewed' ? 'success' : s === 'draft' ? 'warning' : 'info'
 }
 function statusText(s) {
+  // DEV-F9a：F8/F95 起模板还有 status='active'（现役），三元链兜底把它错标成
+  // 「已归档」。补 active 分支；兜底仍留给真归档与未知值。
+  if (s === 'active') return '现役'
   return s === 'reviewed' ? '已审阅' : s === 'draft' ? '草稿' : '已归档'
+}
+
+// DEV-F9a：粒度标签三态映射（原来 character 也显示成「情节段」）
+function scaleText(v) {
+  return { arc: '故事弧', character: '角色模板', segment: '情节段' }[v] || v || '—'
+}
+
+// DEV-F9a：来源书名兼容两种 source_stats 形态 —— 情节骨架是 book_names 数组，
+// F8 角色模板是单数 book 键。统一成数组，模板里只管 join。
+function srcBooks(t) {
+  const s = t?.source_stats || {}
+  if (Array.isArray(s.book_names) && s.book_names.length) return s.book_names
+  return s.book ? [s.book] : []
 }
 
 async function loadList() {

@@ -98,7 +98,10 @@ def _book_context(db: Session, project_id: str, article_id: str) -> dict:
 def _templates_for_plan(db: Session, hint: str) -> tuple[list[dict], list[str]]:
     """按口述检索模板（top-2）；检索不可用/无结果 → 空列表（自由规划）。"""
     try:
-        r = tpl_crud.search(db, query=hint or "", top_k=4)   # 2026-09-17 放开：2 → 4（上下文不省）
+        # DEV-F9a（2026-10-03）：加 scale=arc —— F8 引入 265 条 scale=character 角色模板
+        # 与情节骨架同表（plot_templates），不过滤会混进篇规划参考池（角色模板没有可注入的
+        # 情节节拍，注入不出东西）。角色模板归建卡链（char_archetype 路）。
+        r = tpl_crud.search(db, query=hint or "", top_k=4, scale=tpl_crud.SCALE_ARC)
         return r["items"], [t["id"] for t in r["items"]]
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 模板检索失败: {type(e).__name__}: {e}")

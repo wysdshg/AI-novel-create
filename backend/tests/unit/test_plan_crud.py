@@ -7,7 +7,8 @@ import json
 import pytest
 
 import app.core.database as dbmod
-from app.models.orm import ArticlePlanORM, ArticleORM, VolumeORM, ProjectORM, CharacterORM
+from app.models.orm import (ArticlePlanORM, ArticleORM, VolumeORM, ProjectORM,
+                          CharacterORM, PlotTemplateORM)
 from app.services import plan_crud
 
 
@@ -136,3 +137,46 @@ class TestPlanWorkflow:
 
     def test_no_plan_returns_none(self, test_db, proj):
         assert plan_crud.get_plan(test_db, proj["pid"], proj["aid"]) is None
+
+
+class TestTemplateSearchScaleArc:
+    """DEV-F9a（2026-10-03）：篇规划只吃情节骨架（scale=arc）。
+
+    背景：F8 换血把 265 条 scale='character' 的角色模板放进**同一张** plot_templates 表
+    （同表靠 scale 区分是设计，不是存错）。`_templates_for_plan` 不过滤 scale 时角色模板
+    会混进篇规划的参考池——它们没有可注入的情节节拍，注入不出东西。角色模板归建卡链。
+    """
+
+    def test_search_called_with_scale_arc(self, test_db, monkeypatch):
+        """钉住调用契约：search 必须带 scale='arc'（漏了角色模板就回来了）。"""
+        seen = {}
+
+        def _fake_search(db, **kw):
+            seen.update(kw)
+            return {"mode": "stub", "queries": [], "items": []}
+
+        monkeypatch.setattr(plan_crud.tpl_crud, "search", _fake_search)
+        plan_crud._templates_for_plan(test_db, "主角进入秘境夺宝")
+        assert seen["scale"] == plan_crud.tpl_crud.SCALE_ARC
+        assert seen["scale"] == "arc"
+
+    def test_character_templates_excluded(self, test_db, monkeypatch):
+        """同名同口述的 arc 骨架与 character 角色模板，只有骨架进得了结果。
+
+        强制走关键词兜底路径（`vector_index.enabled` → False），让断言不依赖
+        当前环境装没装 sqlite-vec —— scale 过滤在两条路径上都生效，但这里只钉兜底这条。
+        """
+        monkeypatch.setattr(plan_crud.tpl_crud.vector_index, "enabled", lambda db: False)
+        test_db.add_all([
+            PlotTemplateORM(id="tpl_arc", name="秘境夺宝·骨架", scale="arc", status="active",
+                            logline="主角进入秘境夺宝", structure={"phases": []}),
+            PlotTemplateORM(id="tpl_char", name="秘境夺宝·角色", scale="character", status="active",
+                            logline="主角进入秘境夺宝", structure={"cast": []}),
+        ])
+        test_db.commit()
+
+        items, ids = plan_crud._templates_for_plan(test_db, "秘境夺宝")
+
+        assert "tpl_arc" in ids, "同名的情节骨架应被召回"
+        assert "tpl_char" not in ids, "角色模板不得混进篇规划参考池"
+        assert all(i["scale"] == "arc" for i in items)
