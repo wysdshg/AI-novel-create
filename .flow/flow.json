@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-03T08:57:29.380Z",
+  "updatedAt": "2026-10-03T09:43:29.037Z",
   "modules": {
     "0": {
       "id": "0",
@@ -669,11 +669,11 @@
           "id": "F9",
           "type": "judge",
           "name": "无口述时模板检索兜底",
-          "description": "🟢 方案定稿（2026-10-03 用户拍板），待派单 DEV-F9a/F9b。问题：无口述时检索 query 空→0 命中→origin=free，模板对不写口述的作者不可见；且 10-02 换血误伤致骨架池清空（已修复见 F95）。定稿四分支：①有选+有口述：选中模板锁定+标作者指定，可选 AI 增强口述（qwen3-8B 关思考）→口述框可改→增强口述再检索候选补充；②有选+无口述：选中模板锁定注入，可选 AI 帮写口述草稿（8B）→框内可改；③无选+有口述：现状口述检索 top-4 骨架；④无选+无口述：多路兜底检索（卷概要+篇名+角色名）→空/挂才随机抽 4~5 骨架进 prompt 让 LLM 挑（灵感模式，名单记 raw_ai）。前端加「参考模板」可搜索下拉（列 active 骨架）。派生需求：篇规划检索加 scale=arc 过滤（DEV-F9a）；题材标签等第一本异题材书入库时再打。docs/03 F9 行的「75 条」旧数随实施更正。",
+          "description": "🔵 实施中（四分支主体待 DEV-F9b）。已完成：①F95 骨架池恢复（100 条骨架 active+向量重建）；②DEV-F9a ✅ 2026-10-03 验收归档（commit b6d712b）：_templates_for_plan 加 scale=arc（角色模板归建卡链）、TemplateView 三显示 bug 修复（statusText active现役/srcBooks 双键兼容/scaleText 三态）+默认 arc+active 过滤、新增单测 2 例全量绿、真机冒烟 origin=template 且 4 命中全 arc 骨架。执行渠道变更：OpenCode 限流停用，改用户自带对话执行（DEV-F9a 由用户执行 PM 验收）。剩：DEV-F9b 四分支主体（参考模板下拉/8B 口述增强可改/多路兜底/随机灵感模式）+ 超范围发现并入（详情抽屉 status 下拉缺 active 选项，需连后端 TemplateUpsert/Review pattern 一起改）。执行方回执：冒烟首点遇一次 400（LLM 链路瞬时错误，重试 200，已记功能文档）。",
           "location": "",
-          "state": "planned",
+          "state": "in_progress",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-10-03T08:57:23.691Z",
+          "updatedAt": "2026-10-03T09:43:29.037Z",
           "doc": ".flow/docs/plan-template-fallback.md"
         },
         "CS2": {
