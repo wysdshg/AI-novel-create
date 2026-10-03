@@ -7,6 +7,7 @@
 
 ## 2026-10-03
 
+- **F95 骨架池误伤修复 ✅（动生产库，用户拍板）**。查明 10-02 f8_p3_swap 按 `--status active` 一刀切把 100 条 v3 情节骨架误归档（用户意图只下角色模板）→ 篇规划模板参考池被清空（有口述也只能命中角色模板、beats=0）。精确恢复：备份 264 条 → id 双源核对（换血备份文件 vs 标签判据 100=100）→ UPDATE 100 条 → active → index_template 重建三路向量 1738 块（plot_template 1031/plot_cast 751/char_archetype 751）→ 冒烟命中全为 arc 骨架（beats=6）。164 条旧聚类模板原地不动。顺带查明 TemplateView 三个显示 bug（statusText 兜底吞 active→265 条角色模板全被错标"已归档"/来源读 book_names 而 F8 键是 book/粒度无角色模板）与角色模板混显根因（同表设计，前端缺 scale 过滤）——修复归 DEV-F9a。**F9 四分支方案同日定稿**（显式选模板下拉 + 8B 口述增强可改 + 多路兜底 + 随机灵感模式，详见 .flow/docs/plan-template-fallback.md），DEV-F9a 已派单。
 - **F8 全线关账 ✅（P4 fillFromArchetype 完整验收通过）**。PM GUI 全流程实测（新 PM 接班首轮）：建卡弹窗召回 3 卡（女修调药/同门护伴/释修自持，265 条现役库）、四框自动起草（配角/性格中文/来历定位/简介截 100 字）、性格刻度→中文方向全对（+7 极其重情义/+4 较为守信/±1 顺势跳过/前 5 维）、用作草稿清空重填、落库 toast+行态已建卡+回链、DB 跨进程复核逐字一致、防抄袭提示可见；证据 `gui-test-screenshots/f84/`（7 张）。**验收中发现并修复环境**：MyAPI 网关（9377）未启动 → embedding 全部 10061 拒连 → 召回静默为空（非功能 bug；后端 catch 设计为不阻断建卡）。**遗留 backlog**：召回失败时弹窗无轻提示（用户无从知道网关挂了），待排期。同步收尾：提交上届遗留两处未提交改动（f8_official_pipeline 防弹化 + relation_patterns 拍板落笔，bf233a8）；flow 双图 F84/F8 → completed、清理 7 处非法状态值（done/frozen）；5 份功能文档头状态对账；docs/03 F8 行 → ✅、docs/02 补 P4 条目。
 - **流程改进（编排台）**：F84 验收由 PM 本对话直接调度执行（用户拍板"你就提交并验收吧"），未走 [QA-] 派单——GUI 全程截图证据留档。
 

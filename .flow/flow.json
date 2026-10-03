@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-03T07:39:15.880Z",
+  "updatedAt": "2026-10-03T08:57:29.380Z",
   "modules": {
     "0": {
       "id": "0",
@@ -669,11 +669,11 @@
           "id": "F9",
           "type": "judge",
           "name": "无口述时模板检索兜底",
-          "description": "🔴 待拍板：作者不写『剧情口述』时模板检索 0 命中，75 条模板对这类作者完全不可见。要用篇名/卷概要当查询兜底",
+          "description": "🟢 方案定稿（2026-10-03 用户拍板），待派单 DEV-F9a/F9b。问题：无口述时检索 query 空→0 命中→origin=free，模板对不写口述的作者不可见；且 10-02 换血误伤致骨架池清空（已修复见 F95）。定稿四分支：①有选+有口述：选中模板锁定+标作者指定，可选 AI 增强口述（qwen3-8B 关思考）→口述框可改→增强口述再检索候选补充；②有选+无口述：选中模板锁定注入，可选 AI 帮写口述草稿（8B）→框内可改；③无选+有口述：现状口述检索 top-4 骨架；④无选+无口述：多路兜底检索（卷概要+篇名+角色名）→空/挂才随机抽 4~5 骨架进 prompt 让 LLM 挑（灵感模式，名单记 raw_ai）。前端加「参考模板」可搜索下拉（列 active 骨架）。派生需求：篇规划检索加 scale=arc 过滤（DEV-F9a）；题材标签等第一本异题材书入库时再打。docs/03 F9 行的「75 条」旧数随实施更正。",
           "location": "",
-          "state": "pending_decision",
+          "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z",
+          "updatedAt": "2026-10-03T08:57:23.691Z",
           "doc": ".flow/docs/plan-template-fallback.md"
         },
         "CS2": {
@@ -753,6 +753,16 @@
           ],
           "createdAt": "2026-09-30T14:19:46.462Z",
           "updatedAt": "2026-09-30T14:19:46.462Z"
+        },
+        "F95": {
+          "id": "F95",
+          "type": "process",
+          "name": "F95 骨架池误伤修复",
+          "description": "✅ 2026-10-03 PM 执行完成（用户拍板）。10-02 f8_p3_swap 用 retire --status active 一刀切误伤 100 条 v3 骨架（用户意图只下角色模板）。恢复动作：备份 264 条 archived arc → id 双源核对（换血备份文件 vs 标签判据，100=100 完全一致）→ 精确 UPDATE 100 条 archived→active → index_template 逐行重建三路向量 1738 块 → 跨进程复核 active=100骨架+265角色模板、164 旧聚类模板原地不动 → search 冒烟命中全为 arc 骨架（beats=6）。脚本 scripts/restore_v3_skeletons_20261003.py + step2。顺带查明 TemplateView 三个显示 bug（statusText 兜底吞 active/来源键名 book vs book_names/粒度无角色模板）与角色模板混显根因（同表设计，前端缺 scale 过滤）——修复归 DEV-F9a。",
+          "location": "scripts/restore_v3_skeletons_20261003.py; backend/scripts/retire_plot_templates.py; backend/app/services/plot_template_crud.py index_template",
+          "state": "completed",
+          "createdAt": "2026-10-03T08:57:18.880Z",
+          "updatedAt": "2026-10-03T08:57:18.880Z"
         }
       },
       "edges": {
@@ -825,6 +835,14 @@
           "to": "PT2",
           "createdAt": "2026-09-30T14:19:46.463Z",
           "text": "75 条骨架入模板库"
+        },
+        "e11": {
+          "id": "e11",
+          "from": "F95",
+          "to": "F9",
+          "createdAt": "2026-10-03T08:57:29.380Z",
+          "text": "前置地基",
+          "description": "骨架池恢复是 F9 检索兜底的前置地基"
         }
       }
     },
