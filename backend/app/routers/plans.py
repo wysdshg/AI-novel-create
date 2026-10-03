@@ -2,7 +2,8 @@
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/projects/{pid}/articles/{aid}/plan/generate` | 生成本篇章计划（body: hint/n_chapters/force_free） |
+| POST | `/projects/{pid}/articles/{aid}/plan/generate` | 生成本篇章计划（body: hint/n_chapters/force_free/template_id） |
+| POST | `…/plan/refine-hint` | **AI 增强/代写口述**（qwen3-8B，只回文本，不落库） |
 | GET | `/projects/{pid}/articles/{aid}/plan` | 读当前计划（没有返回 null） |
 | PUT | `/projects/{pid}/articles/{aid}/plan` | 保存行级编辑（表格直接改） |
 | POST | `…/plan/refine-line` | **AI 只改一行**（其余行原样） |
@@ -36,6 +37,15 @@ class GenerateBody(BaseModel):
     hint: str = Field("", description="作者口述（最高优先级）")
     n_chapters: int = Field(8, ge=2, le=40, description="本篇章数")
     force_free: bool = Field(False, description="跳过模板检索，强制自由规划")
+    template_id: str | None = Field(None, description="作者显式选定的参考骨架（锁定注入，跳过检索）")
+
+
+class RefineHintBody(BaseModel):
+    """8B 口述增强/帮写（产物回到口述框由作者改，后端不落库、不触发生成）。"""
+    mode: str = Field("enhance", pattern="^(enhance|draft)$",
+                      description="enhance=扩写现有口述；draft=依据骨架与上下文代写")
+    hint: str = Field("", description="作者现有口述（mode=enhance 时作为底稿）")
+    template_id: str | None = Field(None, description="已选参考骨架（可空）")
 
 
 class RefineLineBody(BaseModel):
@@ -146,7 +156,20 @@ def generate_plan(project_id: str, article_id: str, body: GenerateBody,
     try:
         return ok(plan_crud.generate_plan(db, project_id, article_id, hint=body.hint,
                                           n_chapters=body.n_chapters,
-                                          force_free=body.force_free))
+                                          force_free=body.force_free,
+                                          template_id=body.template_id))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/projects/{project_id}/articles/{article_id}/plan/refine-hint",
+             summary="AI 增强 / 代写剧情口述（qwen3-8B，产物回口述框由作者改）")
+def refine_hint(project_id: str, article_id: str, body: RefineHintBody,
+                db: Session = Depends(get_session)):
+    try:
+        return ok(plan_crud.refine_hint(db, project_id, article_id,
+                                        template_id=body.template_id,
+                                        hint=body.hint, mode=body.mode))
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

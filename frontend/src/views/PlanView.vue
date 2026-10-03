@@ -460,11 +460,35 @@
     </template>
 
     <!-- 生成计划弹窗 -->
-    <el-dialog v-model="genVisible" title="生成本篇章计划" width="520px">
+    <el-dialog v-model="genVisible" title="生成本篇章计划" width="560px">
       <el-form label-width="90px">
+        <el-form-item label="参考模板">
+          <el-select
+            v-model="genForm.template_id"
+            filterable
+            clearable
+            placeholder="自动匹配（留空则按口述或卷概要检索骨架）"
+            style="width: 100%"
+            :loading="skeletonLoading"
+          >
+            <el-option v-for="t in skeletonOptions" :key="t.id" :label="t.name" :value="t.id">
+              <div class="pv-tpl-opt">
+                <span class="pv-tpl-name">{{ t.name }}</span>
+                <span class="pv-tpl-sub">{{ t.logline || '' }}</span>
+              </div>
+            </el-option>
+          </el-select>
+          <span class="pv-gen-tip">选定后锁定该骨架，跳过检索；留空由系统匹配</span>
+        </el-form-item>
         <el-form-item label="口述要求">
           <el-input v-model="genForm.hint" type="textarea" :rows="3"
                     placeholder="可选。最高优先级，例如：主角在这篇要突破，反派第一次正面出场" />
+          <div class="pv-hint-tools">
+            <el-button size="small" :loading="refiningHint" @click="doRefineHint">
+              {{ hintBtnLabel }}
+            </el-button>
+            <span class="pv-gen-tip">{{ refiningHint ? '8B 正在拟口述…' : '先出一句口述，填回这里由你改' }}</span>
+          </div>
         </el-form-item>
         <el-form-item label="章数">
           <el-input-number v-model="genForm.n_chapters" :min="2" :max="40" />
@@ -527,10 +551,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, reactive, nextTick } from 'vue'
+import { computed, onMounted, ref, reactive, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useProjectStore } from '@/store/project'
 import { planApi } from '@/api/plan'
+import { plotTemplateApi } from '@/api/plotTemplate'
 import { castingApi } from '@/api/casting'
 import { characterApi } from '@/api/database'
 import { chapterApi, generateChapterStream } from '@/api/chapter'
@@ -552,13 +577,23 @@ const generating = ref(false)
 const recomputing = ref(false)
 const confirming = ref(false)
 const genVisible = ref(false)
+const refiningHint = ref(false)
 const confirmCharVisible = ref(false)
 const confirmingRow = ref(null)
 const archetypeCards = ref([])   // S1：建卡弹窗的「功能位参考」卡（原型库 top-3）
 const droppedTips = ref([])
 
-const genForm = reactive({ hint: '', n_chapters: 8, force_free: false })
+// F9b 四分支：参考模板下拉的选项 = 现役情节骨架（角色模板不参与篇规划检索）
+const skeletonOptions = ref([])
+const skeletonLoading = ref(false)
+
+const genForm = reactive({ hint: '', n_chapters: 8, force_free: false, template_id: '' })
 const confirmForm = reactive({ role_type: '', personality: '', background: '', brief: '' })
+
+// 有底稿（作者已写了口述）才让 8B 扩写；空着就让它依据骨架与前情代写。
+// 按钮文案跟着 mode 走：一句空口述无从"增强"，写「AI 增强口述」会骗人。
+const hintMode = computed(() => (genForm.hint.trim() ? 'enhance' : 'draft'))
+const hintBtnLabel = computed(() => (hintMode.value === 'enhance' ? 'AI 增强口述' : 'AI 帮我写口述'))
 
 const MIN_SCORE = 0.58   // 与后端 casting_crud 同源（标定表 outputs/选角阈值标定.md）
 
@@ -685,6 +720,42 @@ onMounted(() => {
 })
 
 // —— 生成 ——
+// 参考模板下拉：打开弹窗时才拉现役骨架池（进页面不预支这一次请求）
+async function loadSkeletons() {
+  if (skeletonOptions.value.length) return
+  skeletonLoading.value = true
+  try {
+    const r = await plotTemplateApi.list({ scale: 'arc', status: 'active' })
+    const arr = Array.isArray(r) ? r : (r?.items || [])
+    skeletonOptions.value = arr.map((t) => ({ id: t.id, name: t.name, logline: t.logline || '' }))
+  } catch { /* 拦截器已报错 */ } finally {
+    skeletonLoading.value = false
+  }
+}
+
+watch(genVisible, (v) => { if (v) loadSkeletons() })
+
+// 8B 口述增强/代写（F9b 定稿取舍：产物必须回到口述框可见可改，不做隐藏管道）
+async function doRefineHint() {
+  refiningHint.value = true
+  try {
+    const r = await planApi.refineHint(novelId.value, articleId.value, {
+      mode: hintMode.value,
+      hint: genForm.hint,
+      template_id: genForm.template_id || null,
+    })
+    const text = String(r?.hint || '').trim()
+    if (!text) {
+      ElMessage.warning('8B 没给出口述 —— 可以手写，或换个骨架再试一次')
+      return
+    }
+    genForm.hint = text
+    ElMessage.success('口述已填进输入框，改满意了再点开始生成')
+  } catch { /* 拦截器已报错，手动生成不受影响 */ } finally {
+    refiningHint.value = false
+  }
+}
+
 async function doGenerate() {
   generating.value = true
   try {
@@ -692,6 +763,7 @@ async function doGenerate() {
       hint: genForm.hint,
       n_chapters: genForm.n_chapters,
       force_free: genForm.force_free,
+      template_id: genForm.template_id || null,
     })
     genVisible.value = false
     genForm.hint = ''
@@ -798,6 +870,7 @@ function guardBatchBusy() {
 
 async function onArticleChange() {
   if (guardBatchBusy()) return
+  genForm.template_id = ''   // 换篇清掉锁定的骨架：模板是上一篇选的，跨篇留着会悄悄锁住新篇
   loadAll()
 }
 
@@ -1273,6 +1346,15 @@ const pcStatusType = (s) => ({ pending: 'warning', confirmed: 'success', dismiss
 /* 生成 / 确认弹窗 */
 .pv-gen-tip { margin-left: 10px; color: #c0c4cc; font-size: 12px; }
 .pv-confirm-name { margin-bottom: 12px; color: #606266; }
+
+/* F9b 生成弹窗：参考模板下拉 + 口述工具条 */
+.pv-hint-tools { display: flex; align-items: center; margin-top: 6px; }
+.pv-tpl-opt { display: flex; flex-direction: column; line-height: 1.4; padding: 2px 0; }
+.pv-tpl-name { font-size: 13px; }
+.pv-tpl-sub {
+  font-size: 11px; color: #909399;
+  max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* S1 功能位参考卡（03 §8.5） */
 .pv-archetype-box {

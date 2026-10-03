@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-03T09:43:29.037Z",
+  "updatedAt": "2026-10-03T10:50:12.245Z",
   "modules": {
     "0": {
       "id": "0",
@@ -669,11 +669,11 @@
           "id": "F9",
           "type": "judge",
           "name": "无口述时模板检索兜底",
-          "description": "🔵 实施中（四分支主体待 DEV-F9b）。已完成：①F95 骨架池恢复（100 条骨架 active+向量重建）；②DEV-F9a ✅ 2026-10-03 验收归档（commit b6d712b）：_templates_for_plan 加 scale=arc（角色模板归建卡链）、TemplateView 三显示 bug 修复（statusText active现役/srcBooks 双键兼容/scaleText 三态）+默认 arc+active 过滤、新增单测 2 例全量绿、真机冒烟 origin=template 且 4 命中全 arc 骨架。执行渠道变更：OpenCode 限流停用，改用户自带对话执行（DEV-F9a 由用户执行 PM 验收）。剩：DEV-F9b 四分支主体（参考模板下拉/8B 口述增强可改/多路兜底/随机灵感模式）+ 超范围发现并入（详情抽屉 status 下拉缺 active 选项，需连后端 TemplateUpsert/Review pattern 一起改）。执行方回执：冒烟首点遇一次 400（LLM 链路瞬时错误，重试 200，已记功能文档）。",
+          "description": "✅ 2026-10-03 全线关账（用户自带对话执行，PM 验收归档）。①F95 骨架池恢复（100 条骨架 active+三路向量 1738 块）；②DEV-F9a（commit b6d712b）：计划检索 scale=arc 分工 + TemplateView 三显示 bug 修复 + 默认过滤；③DEV-F9b（9 文件）：四分支主入口 _pick_templates（作者指定锁定 > 口述检索 > 多路兜底 > 随机灵感）+ refine-hint 端点（8B 关思考，产物填口述框可改不落库）+ GenerateBody.template_id + 抽屉 status 补 active + 后端 pattern 补 active + 单测 +16 例（全量 570 绿）+ build 绿。PM 实测：分支④ fallback 账 {queries:[沈砚青],random_ids:[]} 落 raw_ai、命中全 arc 骨架；refine-hint draft 直测出稿。偏差裁决：按钮文案按「口述框有无底稿」定 mode（执行方提案，接受——文案与实际行为一致优于机械映射）。超范围定夺：DEV-F9c 并入（TemplateUpsert.scale 缺 character 422 / force_free 跨弹窗未复位 / 兜底主 query 卷概要空时退化）；backlog（篇选择刷新丢失侧栏不同步、孤儿 plan 行清理）。坑库新增 A15（系统 Python 起后端静默降级+8000 多进程占位）/A16（UTC 时间戳与孤儿行查询陷阱）。",
           "location": "",
-          "state": "in_progress",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-10-03T09:43:29.037Z",
+          "updatedAt": "2026-10-03T10:50:12.245Z",
           "doc": ".flow/docs/plan-template-fallback.md"
         },
         "CS2": {

@@ -194,6 +194,7 @@
 
         <div class="tp-d-actions">
           <el-select v-model="detail.status" size="small" style="width: 120px" @change="changeStatus">
+            <el-option label="现役" value="active" />
             <el-option label="已审阅" value="reviewed" />
             <el-option label="草稿" value="draft" />
             <el-option label="已归档" value="archived" />

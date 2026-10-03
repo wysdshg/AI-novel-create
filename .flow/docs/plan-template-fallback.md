@@ -1,6 +1,6 @@
-# 无口述时模板检索兜底 + 显式选模板（F9·方案定稿待实施）
+# 无口述时模板检索兜底 + 显式选模板（F9·全线关账 2026-10-03）
 
-> 状态: planned | 建立: 2026-09-30 | 更新: 2026-10-03 | 上次验证: 2026-10-03（F95 骨架池恢复后 search 冒烟：命中全为 arc 骨架、beats=6；恢复脚本 scripts/restore_v3_skeletons_20261003.py）
+> 状态: completed | 建立: 2026-09-30 | 更新: 2026-10-03 | 上次验证: 2026-10-03（PM 验收：四分支服务层直调 + HTTP 探针落库双验——分支④ fallback 账 {queries:[沈砚青],random_ids:[]} 落 raw_ai、命中全 arc 骨架；refine-hint draft 直测出稿；单测 570 passed；执行方真机证据 `gui-test-screenshots/f9b/`。排查插曲见 docs/04 A15/A16）
 
 ## 为什么做（问题是什么）
 
@@ -45,7 +45,7 @@
 ## 关联
 
 - 前置 F95（骨架池修复，✅ 2026-10-03）；上游 F3（模板库）；下游 M7/P1（篇规划生成）
-- 实施派单：DEV-F9a（scale 过滤 + TemplateView 显示修复，✅ 2026-10-03 实施完毕待 PM 验收）→ DEV-F9b（四分支主体）→ QA
+- 实施派单：DEV-F9a（scale 过滤 + TemplateView 显示修复，✅ 2026-10-03 实施完毕待 PM 验收）→ DEV-F9b（四分支主体，✅ 2026-10-03 实施完毕待 PM 验收）→ QA
 
 ## 实施记录
 
@@ -78,5 +78,48 @@
 - 只读查库全程 `mode=ro` URI；本单未做任何直接写库（验收 7 的计划落库走应用 API，属任务单指定动作）。
 
 **新发现（超本单范围，留给 PM/F9b 定夺）**：
-- TemplateView 详情抽屉的状态下拉（`TemplateView.vue:196-200`）选项只有 reviewed/draft/archived——active 模板打开抽屉时下拉裸显英文 "active"；且后端 `TemplateUpsert/TemplateReview` 的 status pattern 不含 active，前端直接加选项会在改回 active 时 422。要修需连后端契约一起动，不在 F9a 验收清单内，**未修**。
+- TemplateView 详情抽屉的状态下拉（`TemplateView.vue:196-200`）选项只有 reviewed/draft/archived——active 模板打开抽屉时下拉裸显英文 "active"；且后端 `TemplateUpsert/TemplateReview` 的 status pattern 不含 active，前端直接加选项会在改回 active 时 422。要修需连后端契约一起动，不在 F9a 验收清单内，**未修**。（→ DEV-F9b 已修，见下）
 - `plan_crud._templates_for_plan` 现在只召回 arc 骨架，segment 粒度模板（若未来启用）也会一并被过滤掉——当前 DB 无 active segment，无实际影响；F9b 做四分支时若需要 segment 再放开。
+
+### DEV-F9b（2026-10-03，SWE 执行；四分支主体 + refine-hint + 抽屉 status 修复）
+
+**改动文件（8 个，无库表结构改动、无新增写表路径）**：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/services/plan_crud.py` | ①新增四分支主入口 `_pick_templates`（force_free > 作者指定 > 口述检索 > 无口述兜底 > 随机灵感），`_templates_for_plan` **签名与行为原样保留**（回归保护 + F9a 两条单测不动）；②配套 `_locked_template`（只认 scale=arc 且 status=active，否则 logger.warning 后按无选处理）、`_fallback_queries`（主查询=卷概要截 200 字，缺概要回退篇名；副查询=篇名 + 活跃角色前 8 名顿号拼接）、`_random_skeletons`（现役 arc 池 `random.sample` 抽 4~5 条）、`_picked_skeleton`（模型 template_ref 里出现骨架名即归因为它借鉴的那条，确定性零 LLM）；③`generate_plan` 加 `template_id` 参数并把兜底账写进 `raw_ai["fallback"] = {queries, random_ids, picked}`；④`_plan_prompt` 加 `mode` 关键字参数，**只改模板区说法**（author→标「作者指定」+ 段落标题改「作者指定的参考模板」；random→「随机候选骨架…请结合上下文判断最贴合的 1 个作为主参考」），注入格式与其余 prompt 一字未动；⑤新增 `refine_hint` + `_skeleton_brief` + `_refine_hint_prompt`（8B 口述增强/代写） |
+| `backend/app/routers/plans.py` | `GenerateBody` 加 `template_id`（默认 None）；新端点 `POST …/plan/refine-hint`（`RefineHintBody.mode` pattern `^(enhance|draft)$`），RuntimeError → 400 与既有 generate 同款 |
+| `backend/app/routers/plot_templates.py` | `TemplateUpsert.status` 与 `TemplateReview.status` 两处 pattern 改 `^(active\|draft\|reviewed\|archived)$`（验收 D9）；review 文档串补 active 语义（原文写的 `deprecated` 库里根本不存在） |
+| `backend/tests/unit/test_plan_crud.py` | +16 例：`TestFallbackQueries` 3（卷概要截断/篇名回退不重复占路/空上下文）、`TestFourBranchPick` 7（作者指定跳过检索、三种不可用 id 回落检索、兜底 search 参数契约、兜底空→随机、检索抛异常→随机、池空→free、force_free 全跳过含指定模板）、`TestFourBranchGenerateAccounting` 3（作者指定 prompt 标注 + template_ids 落库、随机降级 raw_ai 记账与 picked 归因、有口述分支不写兜底账=回归钉）、`TestRefineHint` 3（只回文本不写库 + max_tokens/temperature 契约 + B6 无负面措辞、draft 无模板、空返回报错） |
+| `frontend/src/views/PlanView.vue` | 生成弹窗加「参考模板」filterable 下拉（选项=active arc 骨架，副文本 logline，打开弹窗才拉取）；口述框下加 AI 按钮（见下「执行决策」）；`doGenerate` 传 `template_id`；**换篇清掉 template_id**（跨篇锁定残留） |
+| `frontend/src/api/plan.js` | 加 `refineHint`；generate 注释补 template_id 语义 |
+| `frontend/src/views/TemplateView.vue` | 详情抽屉状态下拉补「现役」选项（原本裸显英文 active） |
+| `frontend/src/api/plotTemplate.js` | 注释里的 status 取值补 active（文档漂移修正，无代码改动） |
+
+**验收逐条实测（2026-10-03，本机：后端 8000（venv 重启后新代码）/前端 5173/网关 9377 在线）**：
+
+1. ✅ 四分支后端契约：见上单测；`generate_plan` 新参数经 router 透传，`template_id` 空=旧行为。
+2. ✅ **分支①（选模板+口述）**：UI 选「立威震慑·越阶硬撼·反杀复仇·单挑决斗」→ 点「AI 增强口述」（简陋口述"主角出关后一路碾压仇家"）→ 8B 扩写并**填回口述框**（含所选骨架的节拍词）→ 生成。DB：`template_ids` 仅该 1 条（arc/active）、`origin=template`、`template_ref` = `G06 主动布下阵局`/`C05 立威震慑`。截图 `f9b/02`、`03`（chip 首位即所选模板，验收 C8）
+3. ✅ **分支②（选模板无口述）**：选「跨书骨架组#3」+ 口述留空 → 按钮「AI 帮我写口述」出稿（截图 `04`）→ 清空口述再生成 → DB `template_ids=['跨书骨架组#3']`、`template_ref` 走该骨架节拍，**无 fallback 账**（作者分支不该记兜底）。
+4. ✅ **分支③（不选+口述，回归）**：口述"主角被夺舍后苏醒…棋子…反手布局复仇" → 检索 top-4 全 arc/active（夺舍反噬、反杀复仇·夺舍反噬、秘境夺宝·群殴混战、秘境夺宝·拍卖竞价·吞噬异宝·反杀复仇），`raw_ai` 无 fallback 键 → **与现状一致**。
+5. ✅ **分支④（不选+无口述，多路兜底）**：`raw_ai["fallback"] = {"queries": ["第一篇", "沈砚青"], "random_ids": []}`，兜底命中 4 条 arc 骨架（两次跑命中集稳定一致）。本书第一卷 summary 为空 → 主查询按设计回退篇名，角色路只有 1 个活跃角色，故 queries 只有两项。
+6. ✅ **随机灵感降级**：真机未触发（兜底有命中），按定稿只在"兜底空/检索抛异常"时启用 → 由单测两例覆盖（空命中→随机、search 抛 RuntimeError→随机，且断言 4≤名单≤5、只抽 active arc、raw_ai 记 `random_ids`+`picked`）。
+7. ✅ **force_free**：UI 开关开一次 → `origin=free`、`template_ids=[]`、无 fallback 键、`template_ref` = "无模板·自建开场"；单测另钉"force_free 连作者指定也跳过"。截图 `07`、`08`
+8. ✅ **8B 口述增强/帮写（B4/B5）**：端点直测两模式（`outputs` 临时脚本，已删）→ draft 无模板也能凭卷概要+前情出稿；enhance 把所选骨架节拍织进口述；**计划表 before==after**（不落库、不触发生成，前端拿到只填框）。走 `sf_chat` → 网关 `qwen3-8b`，`enable_thinking:False` 在 `_sf_post` 里已钉死；`max_tokens=300, temperature=0.4`，scene=`sf_refine_hint` 进用量记账。
+9. ✅ **D9 抽屉 status**：active 骨架开抽屉 → 下拉显示「现役」（不再裸显英文）→ 切实役→已审阅→现役，两次 PUT **均 200**（网络面板核对，改前会 422），事后模板状态已复核回 `active`。截图 `05`
+10. ✅ 全量单测 **570 passed / exit 0**（基线 554 + 新增 16）；`npm run build` exit 0。
+11. ✅ 提示词纪律（docs/04 B5/B6）：新增 prompt 全用中文引号「」、无「不要 XX」句式（单测里直接断言 `"不要" not in prompt`）；未叠加新约束，只替换模板区标题一行。
+
+**执行决策/坑**：
+- **按钮文案与 mode 都由「口述框有没有底稿」决定**，与任务单字面「选中模板后文案变 AI 增强口述」有偏差：空口述无从"增强"，写「AI 增强口述」而实际发 `mode=draft` 会骗作者。现规则=有底稿→「AI 增强口述」/enhance，无底稿→「AI 帮我写口述」/draft（选了模板也一样，8B 会拿模板骨架当依据）。任务单场景①（有选+有口述）文案仍是「AI 增强口述」。
+- 分支判定顺序写成一条直线（force_free→author→hint→fallback→random），`_pick_templates` 返回 `(templates, ids, mode, fallback)`；不改 `_templates_for_plan` 签名，避免动到 F9a 刚钉的两条契约单测。
+- `picked` 归因用「骨架名出现在任一行 template_ref」的确定性判断（template_ref 实测形如 `G06 主动布下阵局`、`退婚逆袭·开局`，骨架名基本都在其中），不额外花 LLM。
+- **🔴 环境坑（重要）**：开工时 8000 端口上的后端进程是**系统 Python 3.12**（`C:\Users\w3013\...\Python312\python.exe dev.py`）拉起的，而该解释器**没装 sqlite-vec** → `vector_index.enabled` 为假 → 模板检索**静默退化成关键词匹配**（`mode=fallback_tags`，不报错、照样出命中，只是质量差且与线上语义不符）。按任务单命令用 `.venv/Scripts/python.exe dev.py` 重启后才是真向量。**排查线索**：检索"能命中但语义离谱"时先看进程解释器与 `sqlite_vec` 是否可导入，别只盯 prompt。
+- 一次 UI 生成返回 400（`plans.py` 把 generate 链路 RuntimeError 包成 400，同参数立即重试 200）——与 F9a 记录同款 LLM 段瞬时失败，与四分支无关；400 时弹窗保持打开、作者可原地重试（拦截器已 ElMessage 报错，不阻塞手动生成）。
+- 只读核对全程 `mode=ro` URI；本单唯一写库=计划生成链路与验收 9 指定的模板状态 PUT（后者已复位）。
+
+**新发现（超本单范围，留给 PM 定夺）**：
+- **兜底质量取决于卷概要**：验收 5 实测里，第一卷 `summary` 为空 → 兜底主查询退化成篇名「第一篇」，4 条命中里混进语义无关的「鄢陵定鼎」。建议：卷概要为空时生成弹窗给一句"补写卷概要可让自动匹配更准"的提示，或把 `article.summary` 也纳入兜底查询串（`_book_context` 目前不收集篇概要）。
+- **TemplateUpsert.scale 只允许 `arc|segment`**：模板库页 F9a 已能筛出 `scale=character` 的角色模板并开抽屉，此时改状态保存会因 scale 校验 422（与本单修的 status 是同一处 PUT 的另一个契约缺口）。人物模板库页（CharTemplateView）另有一条链，未受影响。
+- **PlanView 的「篇」选择是组件本地状态**：刷新/HMR 后丢失需重选；且侧栏树点中某篇不会同步到本页（`onMounted` 只读一次 `store.currentArticle`）。属既有 UX 缺口，本单未动。
+- **force_free 开关在 genForm 里持久**：关掉弹窗再开仍是上次的值，作者可能"带着上次的自由规划"点了生成。建议每次开弹窗复位（或把已开启状态在按钮文案上强调）。

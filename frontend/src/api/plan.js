@@ -3,9 +3,15 @@
 import http from './http'
 
 export const planApi = {
-  // 生成本篇章计划（hint=作者口述最高优先级；n_chapters 2~40；force_free 跳过模板检索）
+  // 生成本篇章计划（hint=作者口述最高优先级；n_chapters 2~40；force_free 跳过模板检索；
+  // template_id=作者显式选定的骨架，锁定注入并跳过检索 —— DEV-F9b 四分支）
   generate: (projectId, articleId, data) =>
     http.post(`/projects/${projectId}/articles/${articleId}/plan/generate`, data),
+
+  // AI 增强/代写剧情口述（qwen3-8B）：mode=enhance 扩写现有口述 / draft 依据骨架与上下文代写。
+  // 只回一句文本，后端不落库也不触发生成 —— 产物填回口述框由作者改。
+  refineHint: (projectId, articleId, data) =>
+    http.post(`/projects/${projectId}/articles/${articleId}/plan/refine-hint`, data),
 
   // 读当前计划（没有返回 null；含 carryover / reentry_materials 连续性数据）
   get: (projectId, articleId) =>

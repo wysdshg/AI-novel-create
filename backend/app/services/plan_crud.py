@@ -21,6 +21,7 @@ Phase 7.3.5（2026-09-13）新增两块，全部**零 LLM 成本**：
 import copy
 import json
 import logging
+import random
 import uuid
 import re
 from datetime import datetime
@@ -32,7 +33,9 @@ from app.models.orm import (
     ArticlePlanORM, ArticleORM, ChapterMemoryORM, ChapterORM,
     CharacterORM, ForeshadowORM, PlannedCharORM, VolumeORM,
 )
-from app.services.plot_import import _ds_post, ds_key, make_usage_cb, parse_json_loose
+from app.services.plot_import import (
+    _ds_post, ds_key, make_usage_cb, parse_json_loose, sf_chat,
+)
 from app.services import casting_crud
 from app.services import plot_template_crud as tpl_crud
 
@@ -108,6 +111,136 @@ def _templates_for_plan(db: Session, hint: str) -> tuple[list[dict], list[str]]:
         return [], []
 
 
+# ---------------------------------------------------------------------------
+# 四分支选模板（DEV-F9b，2026-10-03 定稿）
+#   ①作者显式选 → 锁定注入（标「作者指定」，跳过检索）
+#   ②无选 + 有口述 → 口述检索 top-4（现状，回归保护）
+#   ③无选 + 无口述 → 多路兜底检索（卷概要 / 篇名 / 活跃角色）
+#   ④兜底仍空或检索挂了 → 随机抽骨架当灵感触发器（名单记 raw_ai）
+# ---------------------------------------------------------------------------
+def _locked_template(db: Session, template_id: str) -> dict | None:
+    """取作者显式选定的骨架；只认 scale=arc 且 status=active，否则返回 None（按无选处理）。"""
+    try:
+        o = tpl_crud.get(db, template_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plan] 指定模板读取失败: {type(e).__name__}: {e}")
+        return None
+    if o is None or o.scale != tpl_crud.SCALE_ARC or (o.status or "") != "active":
+        return None
+    return tpl_crud._to_dict(o)
+
+
+def _fallback_queries(ctx: dict) -> tuple[str, list[str]]:
+    """无口述时的多路兜底查询串：主查询=卷概要截 200 字（缺概要回退篇名）。"""
+    main = (ctx.get("volume_summary") or "").strip()[:200]
+    extra: list[str] = []
+    title = (ctx.get("article_title") or "").strip()
+    if title:
+        extra.append(title)
+    names = [n for n in (ctx.get("characters") or []) if n][:8]
+    if names:
+        extra.append("、".join(names))
+    if not main:
+        main = extra[0] if extra else ""
+    return main, [q for q in extra if q != main]
+
+
+def _random_skeletons(db: Session) -> list[dict]:
+    """随机灵感降级：从现役骨架池抽 4~5 条（灵感触发器定位，不追求可复现）。"""
+    try:
+        pool = tpl_crud.list_templates(db, scale=tpl_crud.SCALE_ARC, status="active")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plan] 随机骨架池读取失败: {type(e).__name__}: {e}")
+        return []
+    if not pool:
+        return []
+    return random.sample(pool, min(len(pool), random.randint(4, 5)))
+
+
+def _picked_skeleton(templates: list[dict], lines: list[dict]) -> str | None:
+    """随机降级后模型实际借鉴了哪一条（template_ref 里出现骨架名即算），供 raw_ai 记账。"""
+    refs = " ".join(str(ln.get("template_ref") or "") for ln in lines)
+    for t in templates:
+        if t.get("name") and t["name"] in refs:
+            return t["name"]
+    return None
+
+
+def _pick_templates(db: Session, hint: str, ctx: dict, *,
+                    template_id: str | None = None,
+                    force_free: bool = False) -> tuple[list[dict], list[str], str, dict]:
+    """四分支主入口 → (模板, 模板 id, 分支名, 兜底记账)。"""
+    if force_free:
+        return [], [], "free", {}
+    if template_id:
+        t = _locked_template(db, template_id)
+        if t is not None:
+            return [t], [t["id"]], "author", {}
+        logger.warning(f"[plan] 指定模板不可用（需 scale=arc 且 status=active），"
+                       f"按自动匹配处理: {template_id}")
+    if (hint or "").strip():
+        items, ids = _templates_for_plan(db, hint)
+        return items, ids, "hint", {}
+
+    main, extra = _fallback_queries(ctx)
+    fallback = {"queries": [q for q in [main] + extra if q], "random_ids": []}
+    items: list[dict] = []
+    try:
+        items = tpl_crud.search(db, query=main, queries=extra,
+                                scale=tpl_crud.SCALE_ARC, top_k=4)["items"]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plan] 无口述兜底检索失败（转随机灵感）: {type(e).__name__}: {e}")
+    if items:
+        return items, [t["id"] for t in items], "fallback", fallback
+    rnd = _random_skeletons(db)
+    if not rnd:
+        return [], [], "free", fallback
+    fallback["random_ids"] = [t["id"] for t in rnd]
+    return rnd, fallback["random_ids"], "random", fallback
+
+
+# ---------------------------------------------------------------------------
+# 8B 口述增强 / 帮写（DEV-F9b B4：产物必须回到口述框让作者改，不做隐藏管道）
+# ---------------------------------------------------------------------------
+def _skeleton_brief(t: dict) -> str:
+    """骨架压成一行给 8B 当参考（名 + logline + 节拍名，够它知道本篇走什么结构）。"""
+    beats = [b.get("beat") for ph in (t.get("structure") or {}).get("phases") or []
+             for b in (ph.get("beats") or []) if b.get("beat")]
+    return f"《{t['name']}》{t.get('logline') or ''}｜节拍：{'、'.join(beats) or '—'}"
+
+
+def _refine_hint_prompt(ctx: dict, tpl: dict | None, hint: str, mode: str) -> str:
+    ask = ("作者已经写了一句简单的口述，请在保住它的剧情方向与专有名词的前提下把它扩写成标准口述。"
+           if mode == "enhance" and (hint or "").strip()
+           else "作者还没写口述，请依据参考骨架与本篇上下文拟一句标准口述。")
+    return (
+        "你是网文剧情策划助手。请把「本篇剧情口述」写成标准口述。\n"
+        "标准口述 = 一句话（40~80 字），说清「谁在本篇要做什么、与谁冲突、结果把局面推成什么样」。\n\n"
+        f"{ask}\n\n"
+        f"参考骨架：{(_skeleton_brief(tpl) if tpl else '（作者未指定，按本篇上下文自行设计）')}\n"
+        f"本篇篇名：{ctx.get('article_title') or '（未命名）'}\n"
+        f"卷概要：{ctx.get('volume_summary') or '（无）'}\n"
+        f"上一章结尾：…{(ctx.get('prev_arc') or '')[-400:]}\n"
+        + (f"作者现有口述：{hint}\n" if (hint or "").strip() else "")
+        + "\n输出要求：只输出那一句口述正文，从第一个字开始就是口述本身。"
+    )
+
+
+def refine_hint(db: Session, project_id: str, article_id: str, *,
+                template_id: str | None = None, hint: str = "",
+                mode: str = "enhance") -> dict:
+    """用网关 qwen3-8B（关思考）增强或代写口述；**只返回文本**，不落库、不触发生成。"""
+    ctx = _book_context(db, project_id, article_id)
+    tpl = _locked_template(db, template_id) if template_id else None
+    raw = sf_chat(db, _refine_hint_prompt(ctx, tpl, hint, mode),
+                  scene="sf_refine_hint", max_tokens=300, temperature=0.4)
+    text = (raw or "").strip().strip('"').strip('「」').strip()
+    if not text:
+        raise RuntimeError("口述增强失败：模型未返回内容")
+    return {"hint": text, "mode": mode,
+            "template_id": (tpl or {}).get("id"), "template_name": (tpl or {}).get("name")}
+
+
 def resident_quota(active_count: int) -> int:
     """S4（03 §8.8）最简形态：常驻角色建议配额 —— **由活跃角色数推算，不手工配**。
 
@@ -118,7 +251,8 @@ def resident_quota(active_count: int) -> int:
 
 
 def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
-                 n_chapters: int, resident_quota: int | None = None) -> str:
+                 n_chapters: int, resident_quota: int | None = None,
+                 *, mode: str = "hint") -> str:
     """构造规划 prompt。
 
     🔴 **模板注入瘦身（2026-09-13，成本优化）**：模板只送「骨架」——
@@ -129,6 +263,10 @@ def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
     瘦身后模板块从 8000+ 字符降到数百字符量级，属于纯浪费的减法。
 
     保留 `beat 名` 是刻意的：模型要靠节拍名去填 `template_ref` 字段，这一层不能砍。
+
+    `mode`（DEV-F9b 四分支）只改模板区的**说法**，注入格式不变：
+    `author` = 作者显式选定（标「作者指定」，优先级高于检索候选）；
+    `random` = 随机灵感候选（由模型自己挑最贴合的 1 个）；其余 = 检索候选。
     """
     t_blocks = []
     for t in templates:
@@ -137,11 +275,20 @@ def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
         for ph in st.get("phases") or []:
             beats = "、".join(b.get("beat") or "—" for b in (ph.get("beats") or []))
             phase_lines.append(f"  · {ph.get('phase')}：{beats}")
+        mark = "（作者指定）" if mode == "author" else ""
         t_blocks.append(
-            f"《{t['name']}》—— {t.get('logline') or ''}（节奏 {t.get('rhythm') or '—'}）\n"
+            f"《{t['name']}》{mark}—— {t.get('logline') or ''}（节奏 {t.get('rhythm') or '—'}）\n"
             + "\n".join(phase_lines)
         )
     t_text = "\n\n".join(t_blocks) if t_blocks else "（无匹配模板，请根据口述与上下文自由设计本篇结构）"
+    if mode == "author":
+        t_head = "【作者指定的参考模板（作者选定，请以此为本篇结构主线）】"
+    elif mode == "random":
+        t_head = ("【随机候选骨架（灵感触发器：作者未选模板、检索也无命中，故随机抽取）】\n"
+                  "请结合上下文判断最贴合的 1 个作为主参考，其余可选；"
+                  "把实际借鉴的节拍写进对应行的 template_ref。")
+    else:
+        t_head = "【候选模板（借鉴结构，不要照抄；与口述冲突时以口述为准）】"
 
     ctx_lines = [
         f"篇名：{ctx.get('article_title') or '（未命名）'}",
@@ -181,7 +328,7 @@ def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
            if resident_quota else "")
         + f"作者口述（最高优先级，必须尊重）：{hint or '（未提供，参考模板与上下文设计）'}\n\n"
         f"【本书上下文】\n" + "\n".join(ctx_lines) +
-        f"\n\n【候选模板（借鉴结构，不要照抄；与口述冲突时以口述为准）】\n{t_text}\n\n"
+        f"\n\n{t_head}\n{t_text}\n\n"
         "输出 JSON（不要 markdown 代码块、不要任何额外说明）：\n"
         '{"lines":[{"no":1,"beat":"节拍名（4~8字）","summary":"本章剧情要点（60~120字，'
         '说清冲突与结果）","new_chars":["可引新角色"],"recall_chars":["召回老角色"],'
@@ -218,14 +365,20 @@ def _valid_lines(lines) -> list[dict]:
 
 def generate_plan(db: Session, project_id: str, article_id: str, *,
                   hint: str = "", n_chapters: int = 8,
-                  force_free: bool = False) -> dict:
-    """生成本篇的章节级计划（覆盖该篇的旧 draft）。"""
+                  force_free: bool = False,
+                  template_id: str | None = None) -> dict:
+    """生成本篇的章节级计划（覆盖该篇的旧 draft）。
+
+    模板来源见 `_pick_templates`（DEV-F9b 四分支：作者指定 / 口述检索 / 无口述多路兜底 /
+    随机灵感）；兜底实际用的查询串与随机名单记进 `raw_ai["fallback"]`，让「这次是谁选的模板」可查。
+    """
     key = ds_key(db)
     if not key:
         raise RuntimeError("未配置 DeepSeek Key（app_configs.llm.deepseek_key）")
 
     ctx = _book_context(db, project_id, article_id)
-    templates, t_ids = ([], []) if force_free else _templates_for_plan(db, hint)
+    templates, t_ids, mode, fallback = _pick_templates(
+        db, hint, ctx, template_id=template_id, force_free=force_free)
     origin = "template" if templates else "free"
 
     # S4（03 §8.8 最简形态）：常驻角色建议配额 = 活跃角色数 + 2，夹 [6,12]（推算，不手工配）
@@ -233,7 +386,7 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     active_count = sum(1 for c in chars_all if (c.status or "alive") == "alive")
     quota = resident_quota(active_count)
 
-    raw = _ds_post(key, _plan_prompt(ctx, templates, hint, n_chapters, quota),
+    raw = _ds_post(key, _plan_prompt(ctx, templates, hint, n_chapters, quota, mode=mode),
                    max_tokens=6000, on_usage=make_usage_cb("ds_plan"))
     data = parse_json_loose(raw) or {}
     lines = _valid_lines(data.get("lines"))
@@ -273,6 +426,11 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
            .filter_by(project_id=project_id, article_id=article_id)
            .order_by(ArticlePlanORM.updated_at.desc()).first())
     raw_ai = {"last": raw}
+    # DEV-F9b：无口述兜底实际用了哪些查询串、随机抽了哪几条骨架（含模型最终借鉴的那条）留账
+    if fallback:
+        if fallback.get("random_ids"):
+            fallback["picked"] = _picked_skeleton(templates, lines)
+        raw_ai["fallback"] = fallback
     if old is not None and old.status == "confirmed":
         hist = (old.raw_ai or {}).get("history") or []
         hist.append({"plan": old.plan, "archived_at": datetime.utcnow().isoformat()})

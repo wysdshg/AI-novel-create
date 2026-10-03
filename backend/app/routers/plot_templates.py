@@ -37,7 +37,9 @@ class TemplateUpsert(BaseModel):
     pitfalls: list[str] = []
     rhythm: Optional[str] = None
     source_stats: dict = {}
-    status: str = Field("draft", pattern="^(draft|reviewed|archived)$")
+    # active（现役）是 F8 换血后的主力状态，DEV-F9b 补进白名单：漏了会让前端把现役模板
+    # 存回 active 时 422（详情抽屉的状态下拉正是这个原因）。
+    status: str = Field("draft", pattern="^(active|draft|reviewed|archived)$")
 
 
 class TemplateSearch(BaseModel):
@@ -84,7 +86,7 @@ def update_template(template_id: str, body: TemplateUpsert,
 
 class TemplateReview(BaseModel):
     """B16 最小版：模板审核（只改状态，不动结构）。状态值与前端既有约定一致。"""
-    status: str = Field(..., pattern="^(draft|reviewed|archived)$")
+    status: str = Field(..., pattern="^(active|draft|reviewed|archived)$")
 
 
 @router.post("/{template_id}/review", summary="审核模板（通过 / 退回 / 弃用）")
@@ -92,7 +94,7 @@ def review_template(template_id: str, body: TemplateReview,
                     db: Session = Depends(get_session)):
     """模板库的人工确认入口（B16 最小版，2026-09-17）：只改 `status`。
 
-    语义：`draft` 候选 / `reviewed` 已采用 / `deprecated` 弃用（不进检索结果）。
+    语义：`active` 现役（进检索）/ `draft` 候选 / `reviewed` 已采用 / `archived` 归档（退出检索）。
     """
     o = svc.update(db, template_id, {"status": body.status})
     if o is None:
