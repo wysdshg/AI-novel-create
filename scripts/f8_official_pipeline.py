@@ -61,22 +61,40 @@ def chat_stream(base_url, api_key, model, messages, temperature=0.2, max_tokens=
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     content, t0 = [], time.time()
-    with opener.open(req, timeout=timeout) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data:"):
+    for attempt in range(5):
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    for ch in chunk.get("choices") or []:
+                        if (ch.get("delta") or {}).get("content"):
+                            content.append(ch["delta"]["content"])
+            return "".join(content), time.time() - t0
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 4:
+                import random as _r
+                wait = 30 * (2 ** attempt) + _r.randint(0, 20)
+                print(f"[retry] HTTP {e.code}，{wait}s 后第 {attempt + 2} 次尝试", flush=True)
+                time.sleep(wait)
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
+            raise
+        except (ConnectionResetError, TimeoutError, OSError) as e:
+            if attempt < 4:
+                import random as _r
+                wait = 15 * (2 ** attempt) + _r.randint(0, 10)
+                print(f"[retry] {type(e).__name__}，{wait}s 后第 {attempt + 2} 次尝试", flush=True)
+                time.sleep(wait)
                 continue
-            for ch in chunk.get("choices") or []:
-                if (ch.get("delta") or {}).get("content"):
-                    content.append(ch["delta"]["content"])
-    return "".join(content), time.time() - t0
+            raise
 
 def extract_json(text):
     text = re.sub(r"```(?:json)?", "", text).strip()
@@ -248,6 +266,7 @@ def main():
     ap.add_argument("--render-only", action="store_true", help="跳过 LLM，从已落盘 JSON 直接渲染")
     ap.add_argument("--book", default="凡人修仙传", help="书名（进 source_stats 与页面标题）")
     ap.add_argument("--proper-nouns", default="", help="专名黑名单文件（每行一词；缺省用内嵌凡人表）")
+    ap.add_argument("--api-key", default="", help="直连供应商 key（缺省读 app_configs llm.gateway_key）")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -278,7 +297,7 @@ def main():
         _render(results, clusters, args.out_dir, meta, args.book)
         return
 
-    api_key = get_gateway_key()
+    api_key = args.api_key or get_gateway_key()
 
     agg = json.load(open(args.aggregate, encoding="utf-8"))
     meta = {r["name"]: r for r in agg["rows"]}
@@ -301,6 +320,9 @@ def main():
         nm = os.path.basename(p)[4:-5]
         g = t.get("grade") or meta.get(nm, {}).get("final_grade")
         if g in (3, 4, 5):
+            # 断点：已落盘的 anon 跳过（重跑会重复花 LLM）
+            if os.path.exists(os.path.join(args.out_dir, f"anon_{g}_{nm}.json")):
+                continue
             jobs.append((nm, t, g))
     results = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:

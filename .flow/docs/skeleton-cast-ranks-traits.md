@@ -41,8 +41,8 @@
         contrast（表里反差结构，跨案例归纳）★核心_conflict 同理
         core_conflict（欲望-软肋结构）
         slot_kind（person | goldfinger | entity，可扩展）
-        relation_hooks（❓2026-10-01 用户反馈待拍板：A 模式化[对上/对下/对敌态度模式，去人名，建议票] vs B 删除；
-          结构化建边无论取舍都在观测层 GraphRAG 做，不占模板）
+        relation_patterns（✅2026-10-01 拍板=A 模式化：[{target: 上位者|同伴|敌人|亲人|陌生人, pattern}]，
+          对类不对人；结构化建边在观测层 GraphRAG 做，不占模板字段）
 变更记录（2026-10-01 用户预览反馈）：
   - arc_stance_curve 移出模板字段（逐章曲线=单书剧情数据，不可复用）→ 归观测层/实例层；
     模板价值吸收为 behavior_patterns 里的「立场演变模式」一句话
