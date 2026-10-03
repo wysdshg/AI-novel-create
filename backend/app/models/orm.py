@@ -654,7 +654,7 @@ class PlotTemplateORM(Base):
     __tablename__ = "plot_templates"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
-    scale: Mapped[str] = mapped_column(String(20), index=True, default="arc")  # arc | segment
+    scale: Mapped[str] = mapped_column(String(20), index=True, default="arc")  # arc | segment | character（F8 角色模板）
     genre_tags: Mapped[list] = mapped_column(JSON, default=list)               # 跨题材同构匹配
     logline: Mapped[str | None] = mapped_column(Text, nullable=True)
     # {phases: [{phase, beats: [{beat, variants: [{src, how}]}]}]}

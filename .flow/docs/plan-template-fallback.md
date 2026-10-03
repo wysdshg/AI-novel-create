@@ -1,6 +1,8 @@
 # 无口述时模板检索兜底 + 显式选模板（F9·全线关账 2026-10-03）
 
 > 状态: completed | 建立: 2026-09-30 | 更新: 2026-10-03 | 上次验证: 2026-10-03（PM 验收：四分支服务层直调 + HTTP 探针落库双验——分支④ fallback 账 {queries:[沈砚青],random_ids:[]} 落 raw_ai、命中全 arc 骨架；refine-hint draft 直测出稿；单测 570 passed；执行方真机证据 `gui-test-screenshots/f9b/`。排查插曲见 docs/04 A15/A16）
+>
+> **DEV-F9c（尾巴三小修）2026-10-03 已实施待 PM 验收**：scale 契约补 character / 生成弹窗 force_free 复位 / 兜底主查询 卷概览>篇概览>篇名 + 双空概览行内提示；单测 580 passed，证据 `gui-test-screenshots/f9c/`，详见文末「DEV-F9c 实施记录」。
 
 ## 为什么做（问题是什么）
 
@@ -123,3 +125,45 @@
 - **TemplateUpsert.scale 只允许 `arc|segment`**：模板库页 F9a 已能筛出 `scale=character` 的角色模板并开抽屉，此时改状态保存会因 scale 校验 422（与本单修的 status 是同一处 PUT 的另一个契约缺口）。人物模板库页（CharTemplateView）另有一条链，未受影响。
 - **PlanView 的「篇」选择是组件本地状态**：刷新/HMR 后丢失需重选；且侧栏树点中某篇不会同步到本页（`onMounted` 只读一次 `store.currentArticle`）。属既有 UX 缺口，本单未动。
 - **force_free 开关在 genForm 里持久**：关掉弹窗再开仍是上次的值，作者可能"带着上次的自由规划"点了生成。建议每次开弹窗复位（或把已开启状态在按钮文案上强调）。
+
+### DEV-F9c（2026-10-03，SWE 执行；F9 尾巴三小修，**已实施待 PM 验收**）
+
+**改动文件（6 个，无库表结构改动、无新增写表路径）**：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/routers/plot_templates.py` | `TemplateUpsert.scale` 与 `TemplateSearch.scale` 两处 pattern 改 `^(arc\|segment\|character)$`。**两处都要改**：只补 Upsert 会漏第二个 422 —— F9a 的粒度下拉会把 `scale=character` 一起发给 `/plot-templates/search` |
+| `backend/app/models/orm.py` | `PlotTemplateORM.scale` 注释补 character（原写 `arc \| segment`，与实际数据漂移） |
+| `backend/app/services/plan_crud.py` | ①`_book_context` 新增键 `article_summary`（取 `articles.summary` 截 200 字，容错同原逻辑）；②`_fallback_queries` 主查询优先级改「卷概要 > 篇概览 > 篇名」（`volume_summary` 空时用 `article_summary`，两者皆空才退化篇名），副查询与角色串不变 |
+| `backend/tests/unit/test_plan_crud.py` | +5 例：`TestFallbackQueries` 三档优先级 3 例（卷概览在/仅篇概览/双空）+ `TestBookContextArticleSummary` 2 例（收 article_summary 并截 200、缺概览时为空串） |
+| `backend/tests/unit/test_plot_templates.py` | +`TestScaleWhitelist` 5 例（arc/segment/character 参数化通过、默认 arc、bogus scale 仍 422） |
+| `frontend/src/views/PlanView.vue` | ①`watch(genVisible)` 打开时 `genForm.force_free = false`（docs/04 C6 复位模式，弹窗常驻挂载）；②新增 `noOverviewWarn` computed（当前篇在 `store.structure` 里且卷概览与篇概览**都空**才为真）+ 口述框上方行内小字提示 `.pv-gen-warn`（不弹窗打断） |
+
+**验收逐条实测（2026-10-03，本机：后端 8000（`.venv` 起，见下"环境"）/前端 5173/网关 9377 在线）**：
+
+1. ✅ **第 1 件 scale 契约**：
+   - 单测 5 例（含反证 bogus → 422）。
+   - HTTP 同值整条 PUT（前端 `changeStatus` 的请求形状 `{...detail, status}`）→ **200**（改前 422）；只读快照逐字段比对 → **name/scale/genre_tags/logline/structure/pitfalls/rhythm/source_stats/status 九字段零变化**，仅 `updated_at` 变（`10-02 00:59:27 → 10-03 11:14:48`）。
+   - 真实 UI 路径复测：模板库页 粒度=角色模板（265 个）→ 开「蛮横抢宝型首领」抽屉（下拉显示「现役」）→ 切实役→已审阅→现役，**两次 PUT 均 200**（网络面板 reqid 3/5），事后 DB 复核 `status=active`、active 角色模板仍 265 条。截图 `f9c/00`、`01`、`02`
+   - 反证 PUT（`scale=novel`）→ 422 `String should match pattern '^(arc|segment|character)$'`，白名单仍在守门。
+2. ✅ **第 2 件 force_free 复位**：开弹窗 → 开关打开（DOM `is-checked` + `aria-checked=true`，截图 `04`）→ 点取消关闭 → 重开 → 开关为**关**（`switchChecked:false`、class 无 `is-checked`，截图 `05`）。同一次弹窗内开关照常生效（复位只在打开瞬间触发）。
+3. ✅ **第 3 件兜底 query 质量**：
+   - 真库只读 `_book_context`（原神启动/第一篇）→ `article_summary` 已收集，len=191（≤200 截断契约）。
+   - 三档优先级实测：卷概览在→main=卷概览；卷概览人为置空→**main=篇概览**（修复前此处会退化成品名）；双空→main=篇名。
+   - **真向量检索前后对比**（同一篇真实概览，`mode=vector`）：
+     - 修复后（main=篇概览「陈峰在回春堂暗中藏匿五块灰石…」）命中 `谈判交涉·设伏偷袭·追击追杀·反杀复仇`、**`炼丹炼药`**、`围困被困·追击追杀·破阵解谜`、**`参悟传承`** —— 与"药铺藏灵石/采药"剧情同场；
+     - 修复前同款退化路径（main=篇名「第一篇」）命中混进 `群殴混战·越阶硬撼·单挑决斗·…`、`明道宫定策`（《绍宋》历史系骨架）—— 语义漂移。
+   - **王从天降/第一篇真机生成（不写口述）**：弹窗出现新提示「本篇无卷概览/篇概览，自动匹配可能不准 —— 建议写句口述，或到「概览」页补写」（截图 `03`）→ 点开始生成 → `origin=template`、8 行、UI 徽章「模板规划」（截图 `06`）；fallback 账 `{"queries":["第一篇","沈砚青"],"random_ids":[]}`。
+4. ✅ 全量单测 **580 passed / exit 0**（基线 570 + 新增 10）；`npm run build` exit 0。
+
+**执行决策/坑**：
+- **本单第 3 件对「王从天降」不产生 queries 变化**（如实记录）：该书**卷概览、篇概览、小说总概览三项全空**，主查询按设计仍退化成品名，F9b 观察到的「鄢陵定鼎」漂移**仍在**。真正兜住它的是新增的行内提示（引导作者补概览或写口述）；query 质量提升在有概览的书上成立（上面原神启动的前后对比）。
+- 提示文案用项目自己的名词「卷概览/篇概览」并指路「概览」页（`OverviewView` 的编辑入口），比任务单字面的"卷概要/简介"更好找。
+- 只读核对全程 `mode=ro` URI；本单写库仅两处：角色模板整条 PUT（同值保存 + 状态复原）、王从天降第一篇 **draft** 计划重新生成（任务单指定动作；该篇原状态是 draft，不是 confirmed，未覆盖作者已拍板的计划）。
+- **🔴 A15 的识别方法有误报，本单实测坐实**（已回写 docs/04 A15）：`.venv\Scripts\python.exe` 是**转发器**，会再拉起基础解释器 `Python312\python.exe` 当真正服务进程 —— 于是 CIM 里监听 8000 的 PID 显示成"系统 Python"，但环境其实是 venv。本单靠 `Get-Process | Modules` 看到 `vec0.DLL <= E:\AI小说创作\.venv\Lib\site-packages\sqlite_vec\vec0.DLL` 才判实。**别只看 CommandLine 就杀进程**。
+- 附带纠正：`search` 返回 `mode=vector` **不能**证明 sqlite_vec 已加载 —— 扩展缺失时 `vector_store` 回退 `BruteVectorStore`（纯 Python 点积，结果正确只是慢），照样 `mode=vector`。判向量真伪要看 `vec0.DLL` 是否加载，`mode=fallback_tags` 只说明连 embedding 那段都没走到。
+
+**新发现（超本单范围，留给 PM 定夺）**：
+- **双空概览的书仍拿不到好兜底**：分支④对「王从天降」永远只有 篇名 + 角色名 两路。可选方向（本单未动）：把 `projects.summary`（小说总概览）或前情摘要 `prev_arc` 也纳入兜底料源；或在概览双空时把「AI 帮我写口述」按钮做成显眼引导。
+- **`plan_crud._refine_hint_prompt` / `_plan_prompt` 里仍只写「卷概要」**（`ctx.get('volume_summary')`），篇概览没进规划/拟口述的 prompt 料。本单只按任务单改检索 query 串，prompt 侧要不要同步补料请 PM 定。
+

@@ -30,7 +30,9 @@ router = APIRouter(prefix="/plot-templates", tags=["情节模板库"])
 
 class TemplateUpsert(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
-    scale: str = Field("arc", pattern="^(arc|segment)$")
+    # character（F8 引入的角色模板）与骨架同表同端点：白名单漏了它，模板库页筛出的
+    # 角色模板在详情抽屉改状态保存就会 422（DEV-F9c）。
+    scale: str = Field("arc", pattern="^(arc|segment|character)$")
     genre_tags: list[str] = []
     logline: Optional[str] = None
     structure: dict = {}
@@ -45,7 +47,7 @@ class TemplateUpsert(BaseModel):
 class TemplateSearch(BaseModel):
     query: str = Field("", description="一句模糊口述；与 queries 二选一或同时给")
     queries: Optional[list[str]] = Field(None, description="显式多查询（各查一路 RRF 融合）")
-    scale: Optional[str] = Field(None, pattern="^(arc|segment)$")
+    scale: Optional[str] = Field(None, pattern="^(arc|segment|character)$")
     tags: Optional[list[str]] = None
     top_k: int = Field(8, ge=1, le=20)
 

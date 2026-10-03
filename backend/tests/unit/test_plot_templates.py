@@ -7,7 +7,9 @@
 - **fallback**：向量不可用时关键词兜底（不硬报错）；标签过滤在两条路径下都必须生效。
 """
 import pytest
+from pydantic import ValidationError
 
+from app.routers.plot_templates import TemplateSearch, TemplateUpsert
 from app.services import plot_template_crud as tpl
 from app.services import vector_index
 
@@ -183,3 +185,23 @@ class TestSearchVector:
         _enable_vector(monkeypatch, {"学院": 0, "秘境": 1})
         r = tpl.search(test_db, query="学院大比", scale="segment")
         assert r["items"] == []      # arc 模板不冒充 segment
+
+
+class TestScaleWhitelist:
+    """DEV-F9c（2026-10-03）：路由层 scale 白名单必须含 character。
+
+    角色模板与骨架同表同端点，模板库页详情抽屉保存是**整条 PUT**（body 带 scale=character），
+    白名单漏了它 → 改个状态也 422；检索端点的 scale 过滤同理（粒度下拉可选角色模板）。
+    """
+
+    @pytest.mark.parametrize("scale", ["arc", "segment", "character"])
+    def test_three_scales_accepted(self, scale):
+        assert TemplateUpsert(name="蛮横抢宝型首领", scale=scale).scale == scale
+        assert TemplateSearch(query="夺宝", scale=scale).scale == scale
+
+    def test_default_is_arc(self):
+        assert TemplateUpsert(name="秘境夺宝").scale == "arc"
+
+    def test_bogus_scale_rejected(self):
+        with pytest.raises(ValidationError):
+            TemplateUpsert(name="x", scale="novel")

@@ -211,6 +211,47 @@ class TestFallbackQueries:
     def test_empty_ctx(self):
         assert plan_crud._fallback_queries({}) == ("", [])
 
+    # --- DEV-F9c（2026-10-03）：主查询优先级 卷概要 > 篇简介 > 篇名 ---
+    def test_volume_summary_wins_over_article_summary(self):
+        main, extra = plan_crud._fallback_queries({
+            "volume_summary": "玄" * 260, "article_summary": "篇简介", "article_title": "第一篇",
+        })
+        assert main == "玄" * 200, "卷概要优先，仍截 200 字"
+        assert extra == ["第一篇"]
+
+    def test_article_summary_when_only_volume_missing(self):
+        main, extra = plan_crud._fallback_queries({
+            "volume_summary": "", "article_summary": "少年入宗门即被同门夺舍，反手布局复仇",
+            "article_title": "第一篇", "characters": ["甲", "乙"],
+        })
+        assert main == "少年入宗门即被同门夺舍，反手布局复仇", "卷概要空时用篇简介当主查询"
+        assert extra == ["第一篇", "甲、乙"], "篇名降为副查询，不再独占主查询"
+
+    def test_title_only_when_both_overview_empty(self):
+        main, extra = plan_crud._fallback_queries({
+            "volume_summary": "", "article_summary": "", "article_title": "第一篇",
+        })
+        assert main == "第一篇", "两者都空才退化成品名"
+        assert extra == []
+
+
+class TestBookContextArticleSummary:
+    """DEV-F9c：_book_context 必须收篇简介（截 200 字）——兜底检索的第二优先级料源。"""
+
+    def test_collects_article_summary(self, test_db, proj):
+        a = test_db.query(ArticleORM).filter_by(id=proj["aid"]).one()
+        a.summary = "沈" * 300
+        test_db.commit()
+        ctx = plan_crud._book_context(test_db, proj["pid"], proj["aid"])
+        assert ctx["article_summary"] == "沈" * 200
+        assert ctx["volume_summary"] == "卷概要"
+
+    def test_missing_article_summary_is_blank(self, test_db, proj):
+        a = test_db.query(ArticleORM).filter_by(id=proj["aid"]).one()
+        a.summary = None
+        test_db.commit()
+        assert plan_crud._book_context(test_db, proj["pid"], proj["aid"])["article_summary"] == ""
+
 
 class TestFourBranchPick:
     """DEV-F9b 四分支：作者指定 > 口述检索 > 无口述兜底 > 随机灵感（+ force_free 全跳过）。"""

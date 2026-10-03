@@ -51,11 +51,14 @@ PLANNED_CHAR_LIMIT_STAGE_CHANGE = 12   # S2②：舞台切换（换地图/进入
 # ---------------------------------------------------------------------------
 def _book_context(db: Session, project_id: str, article_id: str) -> dict:
     """收集规划所需的本书上下文（全部容错：缺什么跳什么）。"""
-    ctx: dict = {"volume_summary": "", "prev_arc": "", "characters": [], "foreshadows": []}
+    ctx: dict = {"volume_summary": "", "article_summary": "", "prev_arc": "", "characters": [], "foreshadows": []}
     try:
         art = db.query(ArticleORM).filter_by(id=article_id).first()
         if art is not None:
             ctx["article_title"] = art.name or ""
+            # DEV-F9c：卷概要常为空（作者没写/新卷），兜底检索的主查询会退化成品名
+            # （本项目篇名叫「第一篇」，语义空洞）→ 顺手收集篇简介当第二优先级的查询串。
+            ctx["article_summary"] = (art.summary or "")[:200]
             vol = db.query(VolumeORM).filter_by(id=art.volume_id).first() if art.volume_id else None
             if vol is not None:
                 ctx["volume_summary"] = (vol.summary or "")[:500]
@@ -131,8 +134,9 @@ def _locked_template(db: Session, template_id: str) -> dict | None:
 
 
 def _fallback_queries(ctx: dict) -> tuple[str, list[str]]:
-    """无口述时的多路兜底查询串：主查询=卷概要截 200 字（缺概要回退篇名）。"""
-    main = (ctx.get("volume_summary") or "").strip()[:200]
+    """无口述时的多路兜底查询串：主查询按「卷概要 > 篇简介 > 篇名」逐级取，截 200 字。"""
+    main = ((ctx.get("volume_summary") or "").strip()
+            or (ctx.get("article_summary") or "").strip())[:200]
     extra: list[str] = []
     title = (ctx.get("article_title") or "").strip()
     if title:

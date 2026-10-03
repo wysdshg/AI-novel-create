@@ -480,6 +480,9 @@
           </el-select>
           <span class="pv-gen-tip">选定后锁定该骨架，跳过检索；留空由系统匹配</span>
         </el-form-item>
+        <div v-if="noOverviewWarn" class="pv-gen-warn">
+          本篇无卷概览/篇概览，自动匹配可能不准 —— 建议写句口述，或到「概览」页补写
+        </div>
         <el-form-item label="口述要求">
           <el-input v-model="genForm.hint" type="textarea" :rows="3"
                     placeholder="可选。最高优先级，例如：主角在这篇要突破，反派第一次正面出场" />
@@ -594,6 +597,17 @@ const confirmForm = reactive({ role_type: '', personality: '', background: '', b
 // 按钮文案跟着 mode 走：一句空口述无从"增强"，写「AI 增强口述」会骗人。
 const hintMode = computed(() => (genForm.hint.trim() ? 'enhance' : 'draft'))
 const hintBtnLabel = computed(() => (hintMode.value === 'enhance' ? 'AI 增强口述' : 'AI 帮我写口述'))
+
+// 无口述时自动匹配的主查询 = 卷概览 > 篇概览 > 篇名（DEV-F9c）。篇名在本项目常是「第一篇」
+// 这类空洞词，两者都没料就先提醒作者，别让离谱召回看起来像系统坏了。
+const noOverviewWarn = computed(() => {
+  for (const v of store.structure.volumes || []) {
+    const a = (v.articles || []).find((x) => x.id === articleId.value)
+    if (!a) continue
+    return !(v.summary || '').trim() && !(a.summary || '').trim()
+  }
+  return false
+})
 
 const MIN_SCORE = 0.58   // 与后端 casting_crud 同源（标定表 outputs/选角阈值标定.md）
 
@@ -733,7 +747,13 @@ async function loadSkeletons() {
   }
 }
 
-watch(genVisible, (v) => { if (v) loadSkeletons() })
+// docs/04 C6：el-dialog 默认不销毁内部状态 → 每次打开复位「跳过模板」开关，
+// 否则作者会带着上次的自由规划无感知生成出 free 计划。
+watch(genVisible, (v) => {
+  if (!v) return
+  genForm.force_free = false
+  loadSkeletons()
+})
 
 // 8B 口述增强/代写（F9b 定稿取舍：产物必须回到口述框可见可改，不做隐藏管道）
 async function doRefineHint() {
@@ -1349,6 +1369,7 @@ const pcStatusType = (s) => ({ pending: 'warning', confirmed: 'success', dismiss
 
 /* F9b 生成弹窗：参考模板下拉 + 口述工具条 */
 .pv-hint-tools { display: flex; align-items: center; margin-top: 6px; }
+.pv-gen-warn { margin: 0 0 10px 90px; color: #e6a23c; font-size: 12px; }
 .pv-tpl-opt { display: flex; flex-direction: column; line-height: 1.4; padding: 2px 0; }
 .pv-tpl-name { font-size: 13px; }
 .pv-tpl-sub {
