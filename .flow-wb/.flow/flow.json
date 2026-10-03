@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作系统（WorkBuddy 主图）",
-  "updatedAt": "2026-10-01T09:34:26.539Z",
+  "updatedAt": "2026-10-03T07:39:15.835Z",
   "modules": {
     "0": {
       "id": "0",
@@ -394,9 +394,9 @@
           "name": "P0 素材底座",
           "description": "✅ 2026-10-02：知乎花名册78人+密度游程(f8_density_stats)+分诊98批(f8_triage_batch)+聚合定档731角色(f8_triage_aggregate,泛称黑名单+防串门)；抽检样张+对照页齐",
           "location": "",
-          "state": "done",
+          "state": "completed",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-02T09:08:00.000Z"
+          "updatedAt": "2026-10-03T07:39:15.802Z"
         },
         "F81": {
           "id": "F81",
@@ -404,9 +404,9 @@
           "name": "P1 提取器",
           "description": "✅ 2026-10-02：358 模板草稿按档分批合成(f8_template_batch,5:1/4:3/3:4/2:6/1:10)；档5~3 全字段 36+档2 紧凑 100+档1 222",
           "location": "",
-          "state": "done",
+          "state": "completed",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-02T09:08:00.000Z"
+          "updatedAt": "2026-10-03T07:39:15.825Z"
         },
         "F82": {
           "id": "F82",
@@ -424,19 +424,19 @@
           "name": "P3 入库",
           "description": "✅ 2026-10-02：官方化(f8_official_pipeline)档5~3匿名化36(块名单核账0命中)+档2聚合11功能模板；f8_p3_swap 换血：旧100条归档可回滚(DB备份outputs/_backup/)+新46条character入库(三路向量138块,archetype_text位阶/性格两段恢复,search冒烟命中)",
           "location": "",
-          "state": "done",
+          "state": "completed",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-02T09:08:00.000Z"
+          "updatedAt": "2026-10-03T07:39:15.835Z"
         },
         "F84": {
           "id": "F84",
           "type": "process",
           "name": "P4 收口",
-          "description": "🟡 大半完成：三书入库收口 ✅（凡人 46+斗破 71+玄鉴 148=265 现役，专名核账近零命中）；**拍板：跨书聚合模板不做（保留多样性）**；剩 fillFromArchetype playwright 两框非空实测",
+          "description": "✅ 2026-10-03 PM 验收通过，F8 全线关账。fillFromArchetype GUI 全流程实测：召回 3 卡（女修调药/同门护伴/释修自持，265 条现役库）、四框起草（配角/性格中文描述/来历定位/简介截100字）、性格刻度→中文方向全对（+7极其/+4较为/±1跳过/前5维）、用作草稿清空重填、落库 toast+行态已建卡+回链+DB跨进程复核逐字一致、防抄袭提示可见。验收中修复环境：MyAPI 网关(9377)未启动致 embedding 全失败召回空（非功能 bug，网关起后全通）。证据 gui-test-screenshots/f84/。遗留 backlog：召回失败静默无提示（增强项，不阻断）。",
           "location": "",
-          "state": "doing",
+          "state": "completed",
           "createdAt": "2026-09-27T14:35:57.077Z",
-          "updatedAt": "2026-10-02T11:35:00.000Z"
+          "updatedAt": "2026-10-03T07:38:29.712Z"
         }
       },
       "edges": {

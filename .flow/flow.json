@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-01T09:32:38.121Z",
+  "updatedAt": "2026-10-03T07:39:15.880Z",
   "modules": {
     "0": {
       "id": "0",
@@ -650,19 +650,19 @@
           "name": "各书后半段扩章",
           "description": "后半段扩章实况（2026-09-30 查库）：太荒已完成剔除；剩余=九星 601~1800 切段切弧 + 遮天全本 1824 章从切段起步（0 弧）；另有斗破 600+ / 寒门枭士 / 赘婿 / 圣墟 / 逆天邪神等已灌未切可选。按用户选题材优先级排",
           "location": "",
-          "state": "frozen",
+          "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T15:08:36.205Z"
+          "updatedAt": "2026-10-03T07:39:15.846Z"
         },
         "F8": {
           "id": "F8",
           "type": "judge",
           "name": "骨架角色槽位补全",
-          "description": "🟢 P0~P3 ✅ 2026-10-02（凡人修仙传端到端）：①密度游程+Flash-Next 分诊 98 批+聚合双信号定档 731 角色（泛称黑名单+防串门两轮修）②358 模板草稿按档分批合成 ③官方化：档5~3 匿名化 36（块名单核账）+档2 聚合 11 ④P3 换血：旧 100 条归档可回滚+新 46 条 character 模板入库（三路向量 138 块，archetype_text「位阶/性格」两段恢复，专名核账 0 命中，search 冒烟命中）。拍板：arc_stance_curve 移出模板/relation_patterns=A 对类不对人/聚合模板 traits 全 12 维。剩 P2 trait_anchors 锚点校准 + P4 fillFromArchetype playwright 实测。产物 outputs/f8_p0/，脚本 scripts/f8_*.py",
+          "description": "✅ 2026-10-03 全线关账。P0~P3 三书放量（凡人46+斗破71+玄鉴148=265 现役，三路向量齐）+ P4 fillFromArchetype GUI 全流程验收通过（召回/四框起草/性格方向/用作草稿/落库回链/防抄袭提示）。剩尾不在本节点：P2 锚点校准（等攒书）已拆 F82 挂起；存量重命名用户拍板暂缓。拍板：跨书聚合不做。",
           "location": "scripts/label_skeleton_casts.py",
-          "state": "doing",
+          "state": "completed",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-10-02T09:05:00.000Z",
+          "updatedAt": "2026-10-03T07:38:36.150Z",
           "doc": ".flow/docs/skeleton-cast-ranks-traits.md"
         },
         "F9": {
@@ -1200,9 +1200,9 @@
           "name": "九星继续扩容",
           "description": "九星 601~1800 章继续切段切弧（--arc-append）。2026-09-30 查库实测：库里已灌 1~1800 共 1765 章全带摘要，切弧止于 600（38 弧）——原写 1200 已过时，可切范围实为 601~1800。按用户选题材优先级排",
           "location": "",
-          "state": "frozen",
+          "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T15:08:36.205Z"
+          "updatedAt": "2026-10-03T07:39:15.858Z"
         },
         "C1": {
           "id": "C1",
@@ -1220,9 +1220,9 @@
           "name": "语气词密度观察",
           "description": "攒够 10 章同版本样本再定均值（现 7 章，0.29/千字 vs 真人 3.23）",
           "location": "",
-          "state": "frozen",
+          "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-10-03T07:39:15.869Z"
         },
         "C3": {
           "id": "C3",
@@ -1240,9 +1240,9 @@
           "name": "分页/回收站",
           "description": "列表超过 500 行才做分页；回收站要全库软删除改造，判据触发才做",
           "location": "",
-          "state": "frozen",
+          "state": "planned",
           "createdAt": "2026-09-30T13:09:13.029Z",
-          "updatedAt": "2026-09-30T13:09:13.029Z"
+          "updatedAt": "2026-10-03T07:39:15.880Z"
         },
         "D1": {
           "id": "D1",
