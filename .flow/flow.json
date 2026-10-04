@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-04T03:35:12.768Z",
+  "updatedAt": "2026-10-04T03:50:26.975Z",
   "modules": {
     "0": {
       "id": "0",
@@ -779,11 +779,12 @@
           "id": "SK01",
           "type": "process",
           "name": "SK01 库内残留小清点",
-          "description": "🟡 骨架库重制 v4 第一步（原「重灌」缩水版）。实数依据（PM 只读预查 2026-10-04）：绍宋 324 副本未进库（333 行/326 文件）；概括噪声污染率 0.1%（21/16758 行）；B/C 隔离章残留概括行 65 行（赘婿31/秦吏9/圣墟7/绍宋7/斗破5/修真四万2/蛊真2/回明1/遮天1）。实际动作：删 65 行 + 21 行噪声概括逐条处置（删/改/待定）+ 备份可回滚 + verify 核账。零 LLM。任务单已出：outputs/task-DEV-SK01.md（用户自带对话执行，2026-10-04），预查清单 outputs/skel_v4/SK01_待删行清单.txt、SK01_噪声概括行清单.txt。",
+          "description": "✅ 2026-10-04 关账（用户自带对话执行，PM 验收）。chapter_summaries 16758→16688：删 70（65 隔离章残留 + 5 整章感言类噪声）、改写 1（回明 c67 掐尾）、待定 1（遮天 c225 保留结案）。备份 71 行全 15 列可逐行还原；verify 11 PASS/0 FAIL；幂等；681 绿。PM 只读亲跑 4 件复核全过（总数/噪声仅余待定行/B-C 独立重推残留 0/备份 id 全不在库）。偏差追认：c67 summary_raw 同步改写。脚本 backend/scripts/sk01_purge_summaries.py（四段式+端口守卫+单事务）。裁决与 backlog 见 .flow/docs/skel-v4.md。",
           "location": "",
-          "state": "planned",
+          "state": "completed",
           "createdAt": "2026-10-04T02:59:35.550Z",
-          "updatedAt": "2026-10-04T03:10:22.624Z"
+          "updatedAt": "2026-10-04T03:50:26.944Z",
+          "doc": ".flow/docs/skel-v4.md"
         },
         "SK02": {
           "id": "SK02",
@@ -793,7 +794,8 @@
           "location": "",
           "state": "planned",
           "createdAt": "2026-10-04T02:59:35.569Z",
-          "updatedAt": "2026-10-04T03:35:12.727Z"
+          "updatedAt": "2026-10-04T03:50:26.965Z",
+          "doc": ".flow/docs/skel-v4.md"
         },
         "SK03": {
           "id": "SK03",
@@ -803,7 +805,8 @@
           "location": "",
           "state": "planned",
           "createdAt": "2026-10-04T02:59:42.240Z",
-          "updatedAt": "2026-10-04T03:35:12.768Z"
+          "updatedAt": "2026-10-04T03:50:26.975Z",
+          "doc": ".flow/docs/skel-v4.md"
         }
       },
       "edges": {
