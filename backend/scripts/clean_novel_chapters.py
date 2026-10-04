@@ -646,6 +646,21 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 # ───────────────────────── --verify ─────────────────────────
+def _batch_b_rels() -> set[str]:
+    """后批次（DATA01b）台账里被整章隔离/改名的原路径——本批台账只管到自己那批为止。
+
+    文件不存在就返回空集：老库单独跑 --verify 时行为与从前一致。
+    """
+    p = ROOT / "outputs" / "data01b" / "清洗台账_二批.json"
+    if not p.exists():
+        return set()
+    try:
+        rows = json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return set()
+    return {e["rel"] for e in rows if e.get("action") in ("B", "R")}
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """核账只看文件系统现状（docs/04 A14）。"""
     ledger = load_ledger()
@@ -654,7 +669,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     problems: list[str] = []
 
     # 同一文件可能先被 A 改写、后又被 B/C 整章隔离——那时原位没有文件是正确的，不算问题
-    later_quarantined = {e["rel"] for e in b_e}
+    # 二批（DATA01b，他书注入块整章隔离）是另一本台账，这里一并读，否则会假报「A 类文件不存在」
+    later_quarantined = {e["rel"] for e in b_e} | _batch_b_rels()
     moved_after_clean = 0
     residue_a = 0
     for e in a_e:
