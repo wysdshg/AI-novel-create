@@ -31,6 +31,8 @@
 
 - **P3 注入实测单出（2026-10-05）**：`outputs/task-DEV-P3.md`——双路径实测 v4 模板库真实手感：A=现网篇规划链零代码（冒烟口述→检索 top-4→_pick_templates 注入→规划→拍板→生成第 1 章）；B=商讨对话手工 A/B（同骨架块注入 vs 无注入，同模型配置）。临时测试书不碰现役书、零 schema 改动、问题记 backlog。产出 `outputs/p3_inject/`（样张A/B+实测报告）+ 功能记忆 `.flow/docs/p3-inject.md`。P3 结果将决定：词表合并轮开不开、扩容方向一手证据。flow 阶段F 挂 P3 节点（SK03→P3），validate 全绿。
 
+- **P3 注入实测关账 ✅ + P3a 修复单出（2026-10-05）**。P3 验收（PM 亲验：search 源码无精确键分支属实、角色池串扰实锤 样张B 韩昭 9 次 vs A 0、单测 745、现役书指纹前后一致 8d27d09e）：**注入得进、检索得到、正文看得见结构**（路径A 8/8 template_ref 回溯、2276 字落库；A/B 字面复用零=反抄袭生效、章末收束 vs 悬置；串扰致 A/B 只当线索不定量——方法学缺陷执行方如实自报）。**关键发现 [事实·高]：检索层未实现 v4 精确键优先匹配链**（plot_template_crud.search 纯向量+关键词，两层身份只在组装侧）——P3 实测口述含「比试/夺魁」top-4 却混入 夺宝争锋 且 rank1→4 只差 8%。**三项拍板**：①词表合并**暂不开**（偏题根因在检索层非词表粒度，合并只会更同质；先修检索再评估）；②扩容方向证据不足，绍宋线第二口述补测后拍；③测试书保留复用。**P3a 单已出** `outputs/task-DEV-P3a.md`：①检索精确键链（词表关键词快路径优先+轻量 LLM 分类兜底**不阻断主链**，推断记 raw_ai["key_match"]）+ ②命名示例占位符（plan_crud:317 柳青岩泄漏）+ ③行解析重试（plan_crud:398）+ ④计划链走网关改流式（plot_import:348，铁律）。flow P3→completed、P3a planned（P3→P3a）；docs/03 补 P3/P3a 两行。
+
 ## 2026-10-03
 
 - **DEV-F9c F9 尾巴三小修 ✅（用户自带对话执行，PM 验收归档，commit ff354b8，F9 线彻底干净）**。①scale 契约补 character：TemplateUpsert + TemplateSearch 两处（SWE 主动发现只补 Upsert 会漏粒度下拉检索的第二个 422）——角色模板抽屉保存/检索不再 422；②force_free 开弹窗自动复位（docs/04 C6 watch 模式）；③兜底 query 三档优先级「卷概览>篇概览>篇名」（`_book_context` 收 article_summary 截 200）+ 双空概览时口述框上方行内轻提示引导写口述；④单测 +10 例全量 **580 绿**。**裁决×2**：双空概览的书不开新单（UI 已引导写口述=正路；projects.summary 纳入兜底记 backlog）；_plan_prompt/refine prompt 补篇概览记 backlog。**A15 纠正回写（重要）**：F9c 实测坐实 `.venv\Scripts\python.exe` 是转发器，真服务进程 CommandLine 显示基础 Python 路径是**假象**（F9b 验收期 PM 曾误判"8000 被系统 Python 占用"，据此更正）——判 venv 用父进程链 / vec0.DLL 加载路径 / sys.executable；且 `mode=vector` 不能证明 sqlite_vec 已加载（BruteVectorStore 照样报 vector）。
