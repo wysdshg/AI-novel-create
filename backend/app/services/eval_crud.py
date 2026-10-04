@@ -14,6 +14,7 @@ import logging
 import uuid
 from datetime import datetime
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.orm import ChapterVariantORM, EvalRecordORM
@@ -72,7 +73,9 @@ def _latest_scores(db: Session, variant_ids: list[str]) -> dict[str, EvalRecordO
     rows = (
         db.query(EvalRecordORM)
         .filter(EvalRecordORM.variant_id.in_(variant_ids))
-        .order_by(EvalRecordORM.created_at.asc())
+        # created_at 同 tick 打分两次时，"最新"必须取后写入者：rowid 是 SQLite 单调插入序，
+        # 不加它则平手取决于扫描顺序（test_eval 偶发翻车根因，docs/04 B3 同类）
+        .order_by(EvalRecordORM.created_at.asc(), text("rowid ASC"))
         .all()
     )
     latest: dict[str, EvalRecordORM] = {}
@@ -104,7 +107,8 @@ def list_variants(db: Session, chapter_id: str, *, with_content: bool = False) -
     vs = (
         db.query(ChapterVariantORM)
         .filter_by(chapter_id=chapter_id)
-        .order_by(ChapterVariantORM.created_at.desc())
+        # 同 tick 插入的两个版本，"最新在前"必须按插入序：rowid 兜底（同 _latest_scores 注）
+        .order_by(ChapterVariantORM.created_at.desc(), text("rowid DESC"))
         .all()
     )
     latest = _latest_scores(db, [v.id for v in vs])
