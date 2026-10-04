@@ -175,11 +175,13 @@ class TestTemplateSearchScaleArc:
         ])
         test_db.commit()
 
-        items, ids = plan_crud._templates_for_plan(test_db, "秘境夺宝")
+        # 第三项是 DEV-P3a ① 的精确键账（无弧模板带键时为空 dict）
+        items, ids, key_match = plan_crud._templates_for_plan(test_db, "秘境夺宝")
 
         assert "tpl_arc" in ids, "同名的情节骨架应被召回"
         assert "tpl_char" not in ids, "角色模板不得混进篇规划参考池"
         assert all(i["scale"] == "arc" for i in items)
+        assert isinstance(key_match, dict), "账必须是 dict（无键时为空）"
 
 
 def _arc_tpl(tid, name, status="active", scale="arc"):

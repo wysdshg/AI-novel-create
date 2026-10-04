@@ -50,6 +50,10 @@ class TemplateSearch(BaseModel):
     scale: Optional[str] = Field(None, pattern="^(arc|segment|character)$")
     tags: Optional[list[str]] = None
     top_k: int = Field(8, ge=1, le=20)
+    # DEV-P3a ①：精确键优先匹配链开关。默认开；关掉 = 纯向量序（对照/排障用）。
+    # 🔴 这个字段**必须在这里声明**：Pydantic 会静默丢弃未声明字段，曾导致请求体里的
+    #    key_match=false 被丢掉、before/after 对照测不出差别。
+    key_match: bool = Field(True, description="按 (大类,子事件) 精确键优先重排；false=纯向量序")
 
 
 @router.get("", summary="列出模板")
@@ -58,10 +62,11 @@ def list_templates(scale: Optional[str] = None, status: Optional[str] = None,
     return ok(svc.list_templates(db, scale=scale, status=status))
 
 
-@router.post("/search", summary="检索模板（模糊口述 / 多查询 RRF）")
+@router.post("/search", summary="检索模板（模糊口述 / 多查询 RRF / 精确键优先）")
 def search_templates(body: TemplateSearch, db: Session = Depends(get_session)):
     return ok(svc.search(db, query=body.query, queries=body.queries,
-                         scale=body.scale, tags=body.tags, top_k=body.top_k))
+                         scale=body.scale, tags=body.tags, top_k=body.top_k,
+                         key_match=body.key_match))
 
 
 @router.get("/{template_id}", summary="模板详情")

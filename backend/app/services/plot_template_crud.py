@@ -12,7 +12,9 @@
 - 混合语义（"既像学院大比又像秘境寻宝"）不需要拆 —— 向量空间天然落在两簇之间；
   用户显式给多个关键词时走 multi-query RRF。
 """
+import json
 import logging
+import re
 import uuid
 from datetime import datetime
 
@@ -193,6 +195,200 @@ def search_text(t: PlotTemplateORM) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 精确键优先匹配链（DEV-P3a ①）
+# ---------------------------------------------------------------------------
+# 背景：`.flow/docs/skel-v4.md` §二 拍板「①(大类,子事件) 精确匹配优先 → ②同大类其他
+# 子事件（仅检索参考）→ ③其余按向量序」。P3 实测发现这条链**只存在于组装侧**，
+# search() 是纯向量+关键词 —— 后果：口述说「比试」也会召回同大类的「夺宝争锋」。
+#
+# 🔴 **红线：推断层绝不阻断主链**。词表来自库内现役 arc 模板（不硬编码、不写库）；
+# 词表快路径零成本优先，未命中才叫**轻量 LLM 分类**；网关挂/超时/返回垃圾 → 记原因、
+# 退纯向量序，检索照常返回结果。任何一层抛错都在 search() 里兜住。
+KEY_MATCH_SCENE = "sf_key_match"        # 用量记账场景名
+KEY_MATCH_MAX_TOKENS = 80               # 只要一个短 JSON，不给模型发挥空间
+KEY_MATCH_TIMEOUT = 30                   # 秒；分类是「锦上添花」，不值得让作者等
+# 🔴 只试 1 次、不退避（DEV-P3a 实测加）：`_sf_post` 默认重试 5 次指数退避，
+#    网关拒连时作者要白等 **38 秒**才拿到本该立刻返回的向量序结果
+#    （证据 outputs/p3_inject/P3a_红线实测.txt）。分类失败可退化成纯向量序，
+#    重试没有意义 —— 快速失败才是这里正确的行为。
+KEY_MATCH_ATTEMPTS = 1
+
+
+def key_vocab(db: Session) -> dict[str, list[str]]:
+    """从**现役 arc 模板**的 source_stats 抽 {大类: [子事件, ...]}。
+
+    🔴 只读、零成本、随库自同步 —— 不硬编码 57 类词表（那会在类清单变更时静默过期）。
+    """
+    out: dict[str, list[str]] = {}
+    rows = (db.query(PlotTemplateORM)
+            .filter(PlotTemplateORM.scale == SCALE_ARC,
+                    PlotTemplateORM.status == "active").all())
+    for o in rows:
+        ss = o.source_stats or {}
+        if not isinstance(ss, dict):
+            continue
+        cls = str(ss.get("class") or "").strip()
+        if not cls:
+            continue
+        sub = str(ss.get("sub_event") or "").strip()
+        bucket = out.setdefault(cls, [])
+        if sub and sub not in bucket:
+            bucket.append(sub)
+    return out
+
+
+def _keyword_guess_key(query: str, vocab: dict[str, list[str]]) -> tuple[str, str] | None:
+    """词表关键词快路径（零成本）：口述里直接出现类名/子事件名就命中。
+
+    返回 `(大类, 子事件)`：子事件命中 → 精确键；只命中类名 → `(类, "")` 只定到大类层。
+    全不命中 → None（交 LLM 分类）。**取最长命中名**：大类与子事件可能互相包含。
+    """
+    q = (query or "").strip()
+    if not q or not vocab:
+        return None
+    best: tuple[int, str, str] | None = None      # (名长, 大类, 子事件)
+    for cls, subs in vocab.items():
+        for name, sub in [(cls, "")] + [(s, s) for s in subs]:
+            if name and name in q and (best is None or len(name) > best[0]):
+                best = (len(name), cls, sub)
+    return (best[1], best[2]) if best else None
+
+
+def _llm_guess_key(db: Session, query: str, vocab: dict[str, list[str]], *,
+                   timeout: int = KEY_MATCH_TIMEOUT) -> tuple[tuple[str, str] | None, dict]:
+    """轻量 LLM 分类（qwen3-8B 关思考 / temp 0 / 短输出，与 refine-hint 同款配置）。
+
+    🔴 **本函数绝不抛异常**：任何失败都变成 `(None, {ok: False, reason})`，
+    由 search() 退纯向量序。防幻觉：返回的类/子事件必须落在词表内，否则只保留大类层。
+    """
+    if not vocab:
+        return None, {"source": "off", "ok": False, "class": None, "sub_event": None,
+                      "reason": "词表为空（库里没有带键的 arc 模板）"}
+    classes = sorted(vocab)
+    sub_lines = "\n".join(f"  {c}：{'、'.join(sorted(vocab[c]))}" for c in classes)
+    prompt = (
+        "你是情节分类器。判断下面这句作者口述属于哪个（大类, 子事件）。\n"
+        "只能从给定清单里选；都不像就返回空对象。\n"
+        "只输出一个 JSON 对象，不要任何解释。\n\n"
+        f"清单：\n{sub_lines}\n\n"
+        f"口述：{query}\n\n"
+        '输出：{"class":"","sub_event":""}'
+    )
+    acct: dict = {"source": "llm", "ok": False, "class": None, "sub_event": None}
+    try:
+        from app.services import plot_import
+        raw = plot_import.sf_chat(db, prompt, scene=KEY_MATCH_SCENE,
+                                  max_tokens=KEY_MATCH_MAX_TOKENS,
+                                  temperature=0.0, timeout=timeout,
+                                  attempts=KEY_MATCH_ATTEMPTS)
+        raw = (raw or "").strip()
+        # 模型爱加代码块/前后废话：取最外层 JSON 对象
+        m = re.search(r"\{.*\}", raw, re.S)
+        obj = json.loads(m.group(0) if m else raw)
+        if not isinstance(obj, dict):
+            raise ValueError(f"分类返回不是 JSON 对象: {type(obj).__name__}")
+        cls = str(obj.get("class") or "").strip()
+        sub = str(obj.get("sub_event") or "").strip()
+        if cls not in vocab:
+            acct["reason"] = f"分类返回的类不在词表内: {cls!r}"
+            acct["raw"] = raw[:200]
+            return None, acct
+        # 子事件必须属于该类，否则只保留大类层（防幻觉串类）
+        if sub and sub not in vocab[cls]:
+            acct["reason"] = f"子事件不属于该类，降级到大类层: {sub!r}"
+            sub = ""
+        acct.update({"ok": True, "class": cls, "sub_event": sub,
+                     "downgraded": not sub and bool(str(obj.get("sub_event") or "").strip())})
+        return (cls, sub), acct
+    except Exception as e:  # noqa: BLE001
+        # 🔴 红线落点：这里吞掉一切（含超时/网关挂/网关返回垃圾），主链照常
+        acct["reason"] = f"{type(e).__name__}: {str(e)[:160]}"
+        logger.warning(f"[plot_tpl] 键分类失败，退纯向量序（不阻断检索）: {acct['reason']}")
+        return None, acct
+
+
+def _guess_key(db: Session, query: str, vocab: dict[str, list[str]], *,
+              llm: bool = True) -> tuple[tuple[str, str] | None, dict]:
+    """口述 → (大类,子事件)：词表快路径优先，未命中才走轻量 LLM 分类。"""
+    hit = _keyword_guess_key(query, vocab)
+    if hit:
+        return hit, {"source": "keyword", "ok": True, "class": hit[0], "sub_event": hit[1]}
+    if not llm:
+        return None, {"source": "off", "ok": False, "class": None, "sub_event": None,
+                      "reason": "未启用 LLM 分类"}
+    return _llm_guess_key(db, query, vocab)
+
+
+def _rerank_by_key(items: list[dict], key: tuple[str, str] | None) -> list[dict]:
+    """三层重排：精确键(0) → 同大类其他子事件(1) → 其余(2)。**同级内保持原向量序**。"""
+    if not key or not items:
+        return items
+    cls, sub = key
+    if not cls:
+        return items
+    tiered = []
+    for i, it in enumerate(items):
+        ss = it.get("source_stats") or {}
+        c = str(ss.get("class") or "") if isinstance(ss, dict) else ""
+        s = str(ss.get("sub_event") or "") if isinstance(ss, dict) else ""
+        if c != cls:
+            tier = 2
+        elif sub and s == sub:
+            tier = 0
+        else:
+            tier = 1
+        tiered.append((tier, i, it))
+    tiered.sort(key=lambda x: (x[0], x[1]))       # 显式带原下标，稳定
+    return [it for _, _, it in tiered]
+
+
+def _apply_key_match(db: Session, query: str, items: list[dict], *,
+                     llm: bool = True) -> tuple[list[dict], dict]:
+    """检索结果按精确键重排。**任何异常都退化为原序**并把原因记进账。
+
+    🔴🔴 **向量优先守卫**（P3a 实网冒烟实测加的）：分类器与向量 top1 的**大类不一致**时
+    **不重排**。理由：分类器是弱信号且实测不稳定（同一句口述它给过「擂台大比」和
+    「拜师入门」两个答案，后者把错误模板顶到 top1、把向量排第一的正确模板压下去）。
+    精确键链只能**细化**向量已给出的答案（大类内的子事件重排），不能**推翻**它。
+    冲突不丢弃 —— 记进 `key_match`（`conflict` / `vector_top_class`），前端与排查可追。
+    """
+    if not items:
+        return items, {"source": "off", "ok": False, "class": None, "sub_event": None,
+                       "reason": "无候选可重排"}
+    try:
+        vocab = key_vocab(db)
+        key, acct = _guess_key(db, query, vocab, llm=llm)
+        acct.setdefault("reranked", False)
+        acct.setdefault("applied", False)
+        if not key or not key[0]:
+            return items, acct
+        # 🔴 向量优先守卫
+        top_cls = ""
+        ss0 = items[0].get("source_stats") or {}
+        if isinstance(ss0, dict):
+            top_cls = str(ss0.get("class") or "")
+        if top_cls and key[0] != top_cls:
+            acct["conflict"] = True
+            acct["vector_top_class"] = top_cls
+            acct["reason"] = (f"分类器判「{key[0]}」与向量 top1 的「{top_cls}」冲突，"
+                              f"以向量序为准（不重排）")
+            return items, acct
+        acct["conflict"] = False
+        acct["vector_top_class"] = top_cls
+        out = _rerank_by_key(items, key)
+        acct["applied"] = True
+        acct["reranked"] = [i["name"] for i in out] != [i["name"] for i in items]
+        acct["order"] = [i["name"] for i in out]
+        return out, acct
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plot_tpl] 键匹配重排失败，退原序（不阻断检索）: "
+                       f"{type(e).__name__}: {e}")
+        return items, {"source": "error", "ok": False, "class": None, "sub_event": None,
+                       "reranked": False, "applied": False, "conflict": False,
+                       "reason": f"{type(e).__name__}: {str(e)[:160]}"}
+
+
+# ---------------------------------------------------------------------------
 # 向量化（旁路，失败不影响 CRUD）
 # ---------------------------------------------------------------------------
 def index_template(db: Session, t: PlotTemplateORM) -> int:
@@ -360,11 +556,14 @@ def _keyword_filter(db: Session, query: str, scale: str | None,
 
 def search(db: Session, *, query: str, queries: list[str] | None = None,
            scale: str | None = None, tags: list[str] | None = None,
-           top_k: int = 8) -> dict:
+           top_k: int = 8, key_match: bool = True) -> dict:
     """模板检索主入口。
 
     - `query` 一句模糊口述即可；`queries` 显式多查询（如 ["学院大比","秘境寻宝"]），
       多路各查 beat 级 chunks 后 RRF 融合；
+    - `key_match`（DEV-P3a ①，默认开）：口述先推断 (大类,子事件)，再按
+      「精确键 → 同大类 → 其余」三层重排。**推断层不阻断检索**（网关挂/超时退纯向量序），
+      推断与重排依据记在返回值的 `key_match` 账里。`key_match=False` 可关闭（纯向量序）。
     - 无向量能力时自动回退关键词匹配（`mode=fallback`），**不硬报错**；
     - 返回模板 + 其被命中的 beats（卡文场景直接看 variants）。
     """
@@ -374,7 +573,10 @@ def search(db: Session, *, query: str, queries: list[str] | None = None,
     use_vector = vector_index.enabled(db) and q_list
     if not use_vector:
         items = _keyword_filter(db, query or " ".join(queries or []), scale, pool)
-        return {"mode": "fallback_tags", "queries": q_list, "items": items}
+        items, acct = _apply_key_match(db, query or " ".join(queries or []), items,
+                                       llm=key_match)
+        return {"mode": "fallback_tags", "queries": q_list, "items": items,
+                "key_match": acct, "reranked": bool(acct.get("reranked"))}
 
     # --- multi-query 向量检索，beat 级 RRF 融合 ---
     beat_rrf: dict[tuple[str, str], float] = {}   # (template_id, beat_text) -> rrf 分
@@ -394,7 +596,9 @@ def search(db: Session, *, query: str, queries: list[str] | None = None,
 
     if not beat_rrf:
         items = _keyword_filter(db, query or " ".join(q_list), scale, pool)
-        return {"mode": "fallback_tags", "queries": q_list, "items": items}
+        items, acct = _apply_key_match(db, query or " ".join(q_list), items, llm=key_match)
+        return {"mode": "fallback_tags", "queries": q_list, "items": items,
+                "key_match": acct, "reranked": bool(acct.get("reranked"))}
 
     # 聚合到模板：模板分 = 其 beat 的最优 RRF；同时收集每个模板的 matched beats
     by_template: dict[str, dict] = {}
@@ -429,4 +633,9 @@ def search(db: Session, *, query: str, queries: list[str] | None = None,
         items.append({**_to_dict(t), "matched_beats": beats[:6], "_score": round(info["best"], 6)})
 
     items.sort(key=lambda x: -x["_score"])
-    return {"mode": "vector", "queries": q_list, "items": items[:top_k]}
+    # 🔴 DEV-P3a ①：先按向量序截 top_k，再按精确键重排 —— 重排只调整**已召回集合**的
+    #    顺序，不把没召回的模板硬拽进来（那会引入更差的候选）。
+    items = items[:top_k]
+    items, acct = _apply_key_match(db, query or " ".join(q_list), items, llm=key_match)
+    return {"mode": "vector", "queries": q_list, "items": items,
+            "key_match": acct, "reranked": bool(acct.get("reranked"))}

@@ -101,17 +101,20 @@ def _book_context(db: Session, project_id: str, article_id: str) -> dict:
     return ctx
 
 
-def _templates_for_plan(db: Session, hint: str) -> tuple[list[dict], list[str]]:
-    """按口述检索模板（top-2）；检索不可用/无结果 → 空列表（自由规划）。"""
+def _templates_for_plan(db: Session, hint: str) -> tuple[list[dict], list[str], dict]:
+    """按口述检索模板（top-4）；检索不可用/无结果 → 空列表（自由规划）。
+
+    返回值第三项是 DEV-P3a ① 的精确键账（`key_match`），供 `raw_ai` 留痕。
+    """
     try:
         # DEV-F9a（2026-10-03）：加 scale=arc —— F8 引入 265 条 scale=character 角色模板
         # 与情节骨架同表（plot_templates），不过滤会混进篇规划参考池（角色模板没有可注入的
         # 情节节拍，注入不出东西）。角色模板归建卡链（char_archetype 路）。
         r = tpl_crud.search(db, query=hint or "", top_k=4, scale=tpl_crud.SCALE_ARC)
-        return r["items"], [t["id"] for t in r["items"]]
+        return r["items"], [t["id"] for t in r["items"]], (r.get("key_match") or {})
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 模板检索失败: {type(e).__name__}: {e}")
-        return [], []
+        return [], [], {}
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +176,14 @@ def _picked_skeleton(templates: list[dict], lines: list[dict]) -> str | None:
 def _pick_templates(db: Session, hint: str, ctx: dict, *,
                     template_id: str | None = None,
                     force_free: bool = False) -> tuple[list[dict], list[str], str, dict]:
-    """四分支主入口 → (模板, 模板 id, 分支名, 兜底记账)。"""
+    """四分支主入口 → (模板, 模板 id, 分支名, 记账)。
+
+    记账 dict 的内容随分支不同（DEV-P3a ① 起）：
+      · author  → `{}`
+      · hint    → `{"key_match": {...}}`（有精确键推断时；`search` 返回什么就记什么）
+      · fallback→ `{"queries": [...], "random_ids": [...], "key_match": {...}?}`
+    `generate_plan` 据此写 `raw_ai["key_match"]` / `raw_ai["fallback"]`。
+    """
     if force_free:
         return [], [], "free", {}
     if template_id:
@@ -183,24 +193,30 @@ def _pick_templates(db: Session, hint: str, ctx: dict, *,
         logger.warning(f"[plan] 指定模板不可用（需 scale=arc 且 status=active），"
                        f"按自动匹配处理: {template_id}")
     if (hint or "").strip():
-        items, ids = _templates_for_plan(db, hint)
-        return items, ids, "hint", {}
+        # ⚠️ 必须走 `_templates_for_plan`：它带 scale=arc（F9a 加的，挡 265 张 character
+        #    角色模板）且有 try/except 兜底。别在这里直接调 `tpl_crud.search` —— 我踩过：
+        #    漏 scale 会让角色模板混进篇规划参考池，检索抛错还会炸掉整个计划生成。
+        items, ids, km = _templates_for_plan(db, hint)
+        return items, ids, "hint", ({"key_match": km} if km else {})
 
     main, extra = _fallback_queries(ctx)
-    fallback = {"queries": [q for q in [main] + extra if q], "random_ids": []}
+    account: dict = {"queries": [q for q in [main] + extra if q], "random_ids": []}
     items: list[dict] = []
     try:
-        items = tpl_crud.search(db, query=main, queries=extra,
-                                scale=tpl_crud.SCALE_ARC, top_k=4)["items"]
+        r = tpl_crud.search(db, query=main, queries=extra,
+                            scale=tpl_crud.SCALE_ARC, top_k=4)
+        items = r.get("items") or []
+        if r.get("key_match"):
+            account["key_match"] = r["key_match"]
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 无口述兜底检索失败（转随机灵感）: {type(e).__name__}: {e}")
     if items:
-        return items, [t["id"] for t in items], "fallback", fallback
+        return items, [t["id"] for t in items], "fallback", account
     rnd = _random_skeletons(db)
     if not rnd:
-        return [], [], "free", fallback
-    fallback["random_ids"] = [t["id"] for t in rnd]
-    return rnd, fallback["random_ids"], "random", fallback
+        return [], [], "free", account
+    account["random_ids"] = [t["id"] for t in rnd]
+    return rnd, account["random_ids"], "random", account
 
 
 # ---------------------------------------------------------------------------
@@ -314,10 +330,14 @@ def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
         "映射到本书真实角色（从下方角色列表中选，如 主角→本书主角名），没有合适的就放 "
         "`new_chars` 标为新角色。计划的 `recall_chars`/`new_chars` 一律写**本书真实角色名**。\n\n"
         "👥 **新角色命名规则（S2①，治「黑袍人」病）**：\n"
-        "  · `new_chars` 里**必须写具体姓名**（2~4 字中文名，符合本书世界观，如 「柳青岩」）；\n"
+        "  · `new_chars` 里**必须写具体姓名**（2~4 字中文名，符合本书世界观）；\n"
         "  · **严禁把代称当名字**：黑袍人 / 神秘人 / 路人甲 / 蒙面汉子 / 灰衣老者 一类一律不合格；\n"
         "  · 🔓 例外——剧情**刻意隐藏身份**的角色：允许暂用代称，但**必须带「（待揭晓）」后缀**\n"
         "    （如 \"黑袍人（待揭晓）\"），系统会标记待揭晓并在真名出现时归并；\n"
+        # 🔴 DEV-P3a ②：举例名会被模型当素材直接用 —— P3 实测 prompt 里的示例「柳青岩」
+        #    原样出现在 new_chars 与正文里，成了真角色。故改成一眼假的占位符 + 明令禁止照抄。
+        "  · 格式示例（**只是占位符，禁止直接使用**）：如 「示例人名甲」「示例人名乙」；\n"
+        "    实际名字必须符合本书世界观自创。\n"
         "  · 新角色要有戏份设计：首次出现的那一行必须给他具体的行动/对话，不许只挂名。\n\n"
         "🗺 **舞台判断（S2②）**：请在输出里加一个 `\"stage_change\"` 字段（true/false）——\n"
         "本篇是否**换了地图 / 进入全新舞台**（新宗门、新城市、新秘境、时间跳跃后的新阶段）。\n"
@@ -367,6 +387,34 @@ def _valid_lines(lines) -> list[dict]:
     return out
 
 
+def _plan_llm_with_retry(ctx: dict, templates: list[dict], hint: str,
+                         n_chapters: int, resident_quota: int | None, mode: str,
+                         *, key: str, attempts: int = 2) -> dict:
+    """调模型出计划，**解析失败自动重试 1 次**（DEV-P3a ③）。
+
+    P3 实测：首次调用返回的行解析不出来 → 直接 400 给作者看；同一 prompt 重跑即成功。
+    模型输出是随机的，一次抖动不该让作者白点一次「生成计划」。
+    只重试 1 次（不是无限重试）：仍失败说明是真问题，该报错让作者/PM 看见。
+
+    返回 `parse_json_loose` 的结果 + `_attempts`（实际用了几次）+ `_raw`（最后一次原始
+    输出，落 `raw_ai["last"]` 用）。两者都是下划线私有键，调用方 pop 掉。
+    """
+    last_raw = ""
+    for i in range(1, attempts + 1):
+        last_raw = _ds_post(key, _plan_prompt(
+            ctx, templates, hint, n_chapters, resident_quota, mode=mode),
+            max_tokens=6000, on_usage=make_usage_cb("ds_plan")) or ""
+        data = parse_json_loose(last_raw) or {}
+        if _valid_lines(data.get("lines")):
+            if i > 1:
+                logger.warning(f"[plan] 第 {i} 次尝试才解析出有效行（第 1 次模型输出不可用）")
+            return {**data, "_attempts": i, "_raw": last_raw}
+        if i < attempts:
+            logger.warning(f"[plan] 第 {i}/{attempts} 次模型未输出有效行 → 自动重试 1 次（同参）")
+    raise RuntimeError(f"计划生成失败：重试 {attempts - 1} 次后仍拿不到有效行；"
+                       f"raw 前 200 字: {last_raw[:200]!r}")
+
+
 def generate_plan(db: Session, project_id: str, article_id: str, *,
                   hint: str = "", n_chapters: int = 8,
                   force_free: bool = False,
@@ -374,14 +422,15 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     """生成本篇的章节级计划（覆盖该篇的旧 draft）。
 
     模板来源见 `_pick_templates`（DEV-F9b 四分支：作者指定 / 口述检索 / 无口述多路兜底 /
-    随机灵感）；兜底实际用的查询串与随机名单记进 `raw_ai["fallback"]`，让「这次是谁选的模板」可查。
+    随机灵感）；`raw_ai["fallback"]` 记兜底账，`raw_ai["key_match"]` 记 DEV-P3a 的
+    精确键推断与重排依据 —— 「这次模板是谁按什么依据选出来的」可查。
     """
     key = ds_key(db)
     if not key:
         raise RuntimeError("未配置 DeepSeek Key（app_configs.llm.deepseek_key）")
 
     ctx = _book_context(db, project_id, article_id)
-    templates, t_ids, mode, fallback = _pick_templates(
+    templates, t_ids, mode, account = _pick_templates(
         db, hint, ctx, template_id=template_id, force_free=force_free)
     origin = "template" if templates else "free"
 
@@ -390,9 +439,9 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     active_count = sum(1 for c in chars_all if (c.status or "alive") == "alive")
     quota = resident_quota(active_count)
 
-    raw = _ds_post(key, _plan_prompt(ctx, templates, hint, n_chapters, quota, mode=mode),
-                   max_tokens=6000, on_usage=make_usage_cb("ds_plan"))
-    data = parse_json_loose(raw) or {}
+    data = _plan_llm_with_retry(ctx, templates, hint, n_chapters, quota, mode, key=key)
+    raw = data.pop("_raw", "") or ""
+    data.pop("_attempts", None)
     lines = _valid_lines(data.get("lines"))
     if not lines:
         raise RuntimeError(f"计划生成失败：模型未输出有效行；raw 前 200 字: {raw[:200]!r}")
@@ -430,11 +479,17 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
            .filter_by(project_id=project_id, article_id=article_id)
            .order_by(ArticlePlanORM.updated_at.desc()).first())
     raw_ai = {"last": raw}
+    # DEV-P3a ①：精确键推断与重排依据（哪张模板是因为「大类+子事件精确命中」被提前的）
+    if account.get("key_match"):
+        raw_ai["key_match"] = account["key_match"]
     # DEV-F9b：无口述兜底实际用了哪些查询串、随机抽了哪几条骨架（含模型最终借鉴的那条）留账
-    if fallback:
-        if fallback.get("random_ids"):
-            fallback["picked"] = _picked_skeleton(templates, lines)
-        raw_ai["fallback"] = fallback
+    if account.get("queries") or account.get("random_ids"):
+        raw_ai["fallback"] = {"queries": account.get("queries") or [],
+                              "random_ids": account.get("random_ids") or []}
+        if account.get("random_ids"):
+            raw_ai["fallback"]["picked"] = _picked_skeleton(templates, lines)
+        if account.get("key_match"):
+            raw_ai["fallback"]["key_match"] = account["key_match"]
     if old is not None and old.status == "confirmed":
         hist = (old.raw_ai or {}).get("history") or []
         hist.append({"plan": old.plan, "archived_at": datetime.utcnow().isoformat()})

@@ -446,14 +446,131 @@ def _safe_usage_cb(cb, usage, duration_ms: int, ok: bool) -> None:
         logger.warning(f"[plot_import] 用量回调失败（不影响调用）: {type(e).__name__}: {e}")
 
 
+# ---------------------------------------------------------------------------
+# 流式调用（DEV-P3a ④）
+# ---------------------------------------------------------------------------
+# 🔴 铁律「走网关必须流式」：`plot_template_crud` / `plan_crud` 这些**批处理/规划链**
+#    原本都用 `_chat_post` 阻塞读（body 无 stream:true）——P3 实测确认规划链 7.5s
+#    静默返回整段 JSON，网关一旦排队/半开就会长时间无反馈甚至静默拒连。
+#    帧格式与解析口径对齐章节链 `app/core/gateway/adapters/openai_compat.py::stream`：
+#    逐行读 `data: {json}`，取 `choices[0].delta.content`，`[DONE]` 收尾，
+#    **单帧畸形容错跳过但留痕**（Phase 3.5：厂商改结构时这是唯一线索）。
+GW_STREAM_TIMEOUT = 300      # 网关排队最长 120s + 生成，须在同一窗口（见 MyAPI 接入说明）
+
+
+def _stream_text(url: str, key: str, body: dict, *, timeout: int = GW_STREAM_TIMEOUT) -> tuple[str, dict | None]:
+    """流式读一次 chat/completions，返回 (全文, usage)。
+
+    🔴 **断连必须显式报错**，绝不静默返回空串（否则上层把「空」当「模型没话说」，
+    P3 实测的「计划生成失败：模型未输出有效行」就会变成难以定位的假象）。
+    """
+    payload = dict(body)
+    payload["stream"] = True
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}",
+                 "Accept": "text/event-stream", "Accept-Encoding": "identity"})
+    # 绕过系统代理（与 _chat_post 同款：本机 HTTPS_PROXY 会把请求发给 Clash → 502）
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    parts: list[str] = []
+    usage = None
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[plot_import.stream] 跳过无法解析的 SSE 帧: "
+                                   f"{type(e).__name__}: {e}; data={data[:200]!r}")
+                    continue
+                # 部分厂商在**流式末帧**带 usage（此时 choices 为空）→ 先取 usage 再取 choices
+                if obj.get("usage"):
+                    usage = obj["usage"]
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content") or ""
+                if piece:
+                    parts.append(piece)
+                elif (delta.get("reasoning_content") or delta.get("reasoning")):
+                    # 关思考的模型不该产出 reasoning；真产出了也不当正文（宁可空也不要污染）
+                    logger.info("[plot_import.stream] 收到 reasoning 片段但无正文，忽略")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "ignore")[:200]
+        raise RuntimeError(f"网关/厂商返回 HTTP {e.code}: {detail}") from e
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"网关流式调用失败: {type(e).__name__}: {e}") from e
+    text = "".join(parts)
+    if not text.strip():
+        raise RuntimeError("网关流式返回空正文（连接可能中途断开或模型未产出）")
+    return text, usage
+
+
+def _chat_post_stream(url: str, key: str, body: dict, *, timeout: int = GW_STREAM_TIMEOUT,
+                      rate: RateLimiter | None = None, label: str = "LLM",
+                      on_usage=None, attempts: int | None = None) -> str:
+    """`_chat_post` 的流式孪生：限速排队 → `_stream_text` → 用量回调（失败静默）。
+
+    429/5xx 指数退避与 `_chat_post` 同款；重试用尽后**抛错**（不返回空串）。
+
+    🔴 `attempts`（DEV-P3a 加）：给「失败可退、不能拖主链」的调用方压到 1 次
+       （检索层键分类用它，实测默认 5 次退避要白等 38s）。传 1 时**不 sleep**。
+    """
+    n = MAX_RETRY if not attempts or attempts < 1 else int(attempts)
+    rate = rate or RateLimiter()
+    content = ""
+    try:
+        msgs = body.get("messages") or []
+        if msgs:
+            content = str((msgs[0] or {}).get("content") or "")
+    except Exception:  # noqa: BLE001
+        content = ""
+    est = int(est_tokens(len(content)) + min(int(body.get("max_tokens") or 0), 2000))
+    last: Exception | None = None
+    for attempt in range(n):
+        try:
+            rate.acquire(est)
+        except Exception:  # noqa: BLE001
+            pass
+        t0 = time.time()
+        try:
+            text, usage = _stream_text(url, key, body, timeout=timeout)
+            if on_usage:
+                _safe_usage_cb(on_usage, usage, int((time.time() - t0) * 1000), True)
+            return text
+        except RuntimeError as e:
+            last = e
+            # 空正文/断连这类**重试无意义**的，直接上抛（让上层拿到明确错因）
+            if "空正文" in str(e):
+                raise
+            logger.warning(f"[{label}] 流式第 {attempt + 1}/{n} 次失败: {e}")
+            # 最后一次不再睡（没人会等下一次了），也不重试
+            if attempt + 1 < n:
+                time.sleep(min(2.0 * (attempt + 1), 8.0))
+    raise RuntimeError(f"{label} 流式调用重试 {n} 次仍失败: {last}")
+
+
 def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
              temperature: float = 0.3, timeout: int = 300,
-             rate: RateLimiter | None = None, on_usage=None) -> str:
+             rate: RateLimiter | None = None, on_usage=None,
+             attempts: int | None = None) -> str:
     """硅基流动 Qwen3-8B（**关闭思考** —— Qwen3 思考默认开会吃光输出预算并拖慢 60s+）。
 
     2026-09-25：默认 timeout 120→300（网关模式排队最长 120s + 生成时间须在同一窗口，
     见 MyAPI 接入说明「客户端超时必须 ≥ 300 秒」；直连模式 300s 只是上限，无副作用）。
     网关模式下 base/model 切到统一网关（对外名 qwen3-8b）。
+
+    🔴 `attempts`（DEV-P3a 加）：覆盖重试次数。给「锦上添花、失败可退」的调用方用 ——
+       检索层的大类/子事件分类就是这种（网关挂了就退纯向量序），重试 5 次退避
+       会让作者白等 38 秒才拿到本该立刻返回的结果（实测，见 outputs/p3_inject/
+       P3a_红线实测.txt）。传 1 = 只试一次，失败立刻上抛给调用方自己降级。
     """
     base = GW_BASE if GW_ACTIVE else SF_BASE
     model = GW_SF_MODEL if GW_ACTIVE else SF_MODEL
@@ -464,8 +581,13 @@ def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
         "temperature": temperature,
         "enable_thinking": False,
     }
-    return _chat_post(base + "/chat/completions", key, body,
-                      timeout=timeout, rate=rate, label="硅基流动", on_usage=on_usage)
+    url = base + "/chat/completions"
+    # 🔴 铁律：走网关必须流式（DEV-P3a ④）。直连保持原非流式（不在本单改动范围）。
+    if GW_ACTIVE:
+        return _chat_post_stream(url, key, body, timeout=timeout, rate=rate,
+                                 label="硅基流动", on_usage=on_usage, attempts=attempts)
+    return _chat_post(url, key, body, timeout=timeout, rate=rate,
+                      label="硅基流动", on_usage=on_usage, attempts=attempts)
 
 
 def _refresh_gw_mode(db: Session) -> None:
@@ -555,8 +677,14 @@ def _ds_post(key: str, user_content: str, *, max_tokens: int = 3000,
         "thinking": {"type": "disabled"},
     }
     base = GW_BASE if GW_ACTIVE else DS_BASE
-    return _chat_post(base + "/chat/completions", key, body,
-                      timeout=timeout, rate=rate, label="DeepSeek", on_usage=on_usage)
+    url = base + "/chat/completions"
+    # 🔴 铁律：走网关必须流式（DEV-P3a ④ —— P3 实测规划链 7.5s 静默阻塞，
+    #    网关排队/半开时无反馈）。直连保持原非流式（不在本单改动范围）。
+    if GW_ACTIVE:
+        return _chat_post_stream(url, key, body, timeout=timeout, rate=rate,
+                                 label="DeepSeek", on_usage=on_usage)
+    return _chat_post(url, key, body, timeout=timeout, rate=rate,
+                      label="DeepSeek", on_usage=on_usage)
 
 
 def _ms_post(key: str, user_content: str, *, max_tokens: int = 3000,

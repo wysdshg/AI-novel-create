@@ -1,6 +1,6 @@
 # P3 · 模板注入实测（DEV-P3）· 功能记忆
 
-> 状态: ✅ 实施完成待验收 | 建立: 2026-10-04 | 上次验证: 2026-10-04（执行方自跑双验收：路径A 规划+正文落库 ✅／路径B A/B 样张 ✅／verify 现役书零改动 ✅／单测 745 绿 = 681+64）
+> 状态: ✅ 实施完成待验收 | 建立: 2026-10-04 | 上次验证: 2026-10-04（P3 双验收过：路径A 规划+正文落库 ✅／路径B A/B 样张 ✅／verify 现役书零改动 ✅／单测 745 绿 = 681+64；**P3a 已追加，见文末**，单测 799 绿 = 745+54）
 > 工单：`outputs/task-DEV-P3.md`｜交付：`outputs/p3_inject/`｜被测对象：616 张 v4 单弧模板
 > 上游线：`.flow/docs/skel-v4.md`（骨架库 v4，本单的模板来源）
 
@@ -94,3 +94,105 @@ chapter_memories/entity_relations/foreshadows）逐表行数+内容 sha256，
   与 1 块 ref_doc，**与 plot_templates 无关**（plot_template 恒为 3172）。属正常产品行为。
 - 路径A 首次规划 HTTP 400 的那一次，模型返回了合法 JSON 开头但行解析失败，
   与模板库无关（同一 prompt 重跑成功），归入 ③。
+
+---
+
+# P3a · 检索精确键优先匹配链 + 计划链三小修（DEV-P3a）· 功能记忆
+
+> 状态: ✅ 实施完成待验收 | 建立: 2026-10-04 | 单测 797 绿 = 745 基线 + 52 新增
+> 工单：`outputs/task-DEV-P3.md` 的 P3a 段｜交付：`outputs/p3_inject/P3a_*`
+> 前置：本文档上半部分（P3 实测）。P3a 把 P3 的发现 ①②③④ 落了地。
+
+## 九、P3a 做了什么（一句话一件）
+
+| # | 改动 | 位置 |
+|---|---|---|
+| ① | `search` 加 **(大类,子事件) 精确键优先匹配链**：口述 → 词表快路径 → 轻量 LLM 分类 → 三层重排（精确键 → 同大类 → 其余），账记 `key_match`（并透传到 `raw_ai`） | `plot_template_crud.py`（新增 `key_vocab` / `_keyword_guess_key` / `_llm_guess_key` / `_rerank_by_key` / `_apply_key_match`） |
+| ② | 命名示例「柳青岩」→「示例人名甲/乙」+「禁止直接使用」 | `plan_crud.py` 命名规则段 |
+| ③ | 计划行解析失败**自动重试 1 次**（同参），仍败才报错 | `plan_crud.py::_plan_llm_with_retry` |
+| ④ | 计划链走网关改**流式**（`_stream_text` / `_chat_post_stream`，对齐章节链 SSE 帧解析） | `plot_import.py` |
+| ⑤ | 分类器**只试 1 次**（见下「实测打脸的三处」） | `plot_import.py::_sf_post(attempts=)` |
+
+## 十、🔴 实测打脸的三处（**本单最重要的产出**）
+
+### 1. 分类器会判错类，且错判会**放大**成排序事故
+
+同一条口述「主角在宗门比试擂台上一战成名夺魁」，分类器两次给出**不同**答案：
+`擂台大比/擂台夺魁` → 对；`拜师入门`（错）。错判那次把 `拜师入门--宗门试炼-2`
+顶到 top1、把向量排第一的**正确模板压到 rank2** —— 精确键链把分类错误放大了。
+
+**加的守卫（`_apply_key_match`）**：猜测大类与**向量 top1 的大类不一致 → 记冲突、
+不重排、以向量序为准**。精确键链只能**细化**向量已给出的答案，不能**推翻**它。
+账里留 `conflict` / `vector_top_class` / `applied` 可追。
+实测效果：口述 A（分类器对）→ 生效，`拜师入门` 从 rank2 降到 rank4；
+反例口述与绍宋口述（分类器判错类）→ 冲突让位，顺序原样不动。
+
+### 2. 「不阻断主链」不等于「不拖主链」：网关挂时白等 **38.3 秒**
+
+红线本身是过的（挂掉照常返回向量序、账里有原因），但 `_sf_post` 默认**重试 5 次+指数退避**，
+实测 key_match 耗时 **38.3s** 才降级 —— 对「锦上添花」的分类层就是**堵住主链**。
+已加 `attempts` 参数，分类层传 `KEY_MATCH_ATTEMPTS=1`：**快速失败**才是这里正确的行为。
+修完实测降到 **2.1s**（同一脚本同一注入，只改了 attempts）。
+（证据：`outputs/p3_inject/P3a_红线实测.txt`，账里的报错也从「重试 5 次」变成「重试 1 次」）
+
+### 3. 「柳青岩」不是从 prompt 泄漏的，是**测试书自己的角色**
+
+取证时误判「② 没修好」——整条 prompt 里确实有「柳青岩」，但它来自
+`ctx["prev_arc"]`（测试书上一章正文，P3 路径A 生成的第 1 章里柳青岩已是本书角色）。
+扫库确认：`plot_templates` 全表 616 张、616 张的 structure、`vector_chunks` 全表
+**各 0 命中**；命中的只有命名规则段之外的书内正文。模型续写时复用本书既有角色是
+**正确行为**。⇒ 断言必须只打**命名规则段**，不能打整条 prompt，否则把「修对了」判成 FAIL。
+
+## 十一、匹配链的账（`raw_ai["key_match"]`）
+
+```
+{"source": "keyword|llm|off|error", "ok": bool, "class": str|null, "sub_event": str|null,
+ "downgraded": bool,          # LLM 给了子事件但不属于该类 → 降级到大类层
+ "conflict": bool,            # 与向量 top1 大类冲突 → 未生效
+ "vector_top_class": str, "applied": bool, "reranked": bool,
+ "order": [模板名...], "reason": "失败/冲突原因"}
+```
+- **词表不硬编码**：`key_vocab(db)` 从现役 arc 模板的 `source_stats` 实时读
+  {大类: [子事件]} —— 57 类词表若硬编码会在类清单变更时静默过期。
+- **防幻觉**：LLM 返回的类/子事件必须落在词表内，否则不采信（子事件串类则降级到大类层）。
+- **只调顺序不扩召回**：先按向量序截 `top_k` 再重排，不把没召回的模板硬拽进来。
+- `TemplateSearch` **必须声明 `key_match` 字段**：Pydantic 静默丢弃未声明字段，
+  曾导致 before/after 对照测不出差别（`key_match=false` 被丢掉，两次都跑了分类）。
+
+## 十二、④ 流式的坑
+
+- 必须 `build_opener(ProxyHandler({}))` 绕系统代理（网关在 localhost，走代理必坏）；
+  单测因此要 patch `build_opener` 而**不是** `urlopen`（我踩过）。
+- 空正文 / 断连**必须显式抛错**，绝不静默返回空串 —— 否则上层把「空」当「模型没话说」。
+- `sf`/`ds` 两路网关调用都改了流式（铁律是全局的；检索层新加的分类器也走 sf）。
+
+## 十三、复现脚本
+
+| 脚本 | 作用 |
+|---|---|
+| `backend/scripts/p3a_smoke.py` | 检索层实网冒烟（真调网关分类）：A 同口述 before/after、B 反例、C 绍宋线，9 条断言 |
+| `backend/scripts/p3a_plan_verify.py` | ②③④ 进程内取证（③ 注入坏 JSON 触发重试、④ 抓真正发出的请求体验 `stream:true`），8 条断言 |
+| `backend/scripts/p3a_redline.py` | 红线：把 `GW_BASE` 指死端口模拟网关挂，验召回一条不少 + 退向量序 + 账有原因，6 条断言 |
+
+## 十四、本单 backlog（**全部未修**，实测单不擅自改）
+
+- **B1（中）** 分类器同一句口述两次给不同答案（temp=0 仍不稳，网关侧多渠道）。
+  守卫已挡住排序事故，但**准确率仍不足以推翻向量序**；要推翻需先提高分类稳定性。
+- **B2（低）** `TemplateSearch.key_match` 之前未声明 → 请求体里 `key_match=false`
+  被 Pydantic 静默丢弃。已补。**同类风险**：其他 Request 模型可能也有漏声明字段。
+- **B3（低·既有）** `eval_crud.list_variants` 只按 `created_at.desc()` 排序、**无二级排序**，
+  同一时间戳的版本顺序不确定 → `test_eval.py::test_list_newest_first` 偶发翻车
+  （全量连跑 8 次偶现 1 次；单跑必过）。与本单无关，未修（修法：加 `id` 或 `rowid` 兜底）。
+- **B4（低）** P3 发现 ⑤（计划的 `hook` 未在正文兑现）、⑥（616 张 logline 句式同构）
+  本单未处理，仍在 P3 backlog 里。
+
+## 十五、🔴 我自己引入又修掉的回归（留给下一个动这层的人）
+
+改 `_pick_templates` 口述分支时，我把 `_templates_for_plan` **内联掉**、直接调
+`tpl_crud.search(db, query=hint)` —— 顺手就丢了 F9a 加的 **`scale=SCALE_ARC`** 和
+**try/except 兜底**：① 265 张 `scale=character` 角色模板会混进篇规划参考池（角色模板没有
+可注入的情节节拍）；② 检索抛错会炸掉整个计划生成（原先退化成自由规划）。
+已改回走 `_templates_for_plan`（它现在多返回一项 `key_match`），并补 2 条回归测试
+（`test_hint_branch_keeps_arc_scale_filter` / `test_hint_branch_survives_search_exception`）。
+**教训**：这个仓库里检索调用的 `scale=arc` 与 try/except 是 F9a 特意加的语义，
+看着像冗余，实际各挡一类事故 —— 动检索调用前先 `git log -S` 看它为什么加。
