@@ -1,6 +1,6 @@
 # SKEL v4 · 骨架库重制（SK01/SK02/SK03）· 功能记忆
 
-> 状态: completed（SK01 ✅｜SK02 ✅｜SK03 ✅ 全线关账 2026-10-04） | 建立: 2026-10-04 | 更新: 2026-10-04 | 上次验证: 2026-10-04（PM 四件亲验全过：--verify 0 FAIL / --restore-check 100/100 可还原 / 库现状 616·264·265·6 / 单测 745 绿）
+> 状态: in_progress（SK01~SK03 ✅ 2026-10-04 关账；SK04 词表双轨 ✅ 2026-10-05 已拍板；SK05/SK06/SK07 整备→判类→rebuild v4.2 进行中） | 建立: 2026-10-04 | 更新: 2026-10-05 | 上次验证: 2026-10-04（SK03 PM 四件亲验全过：--verify 0 FAIL / --restore-check 100/100 / 单测 745 绿；SK04 实测见 outputs/sk04/词表双轨提案.md）
 > 任务单：`outputs/task-DEV-SK01.md`（✅）、`outputs/task-INTERN-SK02A.md`（✅ 草案交）、SK02b（✅）、**`outputs/task-DEV-SK03.md`（✅ 实施完成，见 §七）**
 > 分类卡草案：`outputs/skel_v4/分类卡草案.md`｜判类输入：`outputs/skel_v4/弧速览-v3.txt`（616 弧，**必须用 v3**，v1/v2 有 A17 错位）
 
