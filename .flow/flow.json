@@ -846,7 +846,7 @@
           "name": "SK05 词表落地+数据整备",
           "state": "planned",
           "description": "⏳ 用户四项拍板的执行单（task-DEV-SK05.md）：词表库写（INSERT 13 新类+3 candidate 转正+A04/F03 定义更新+scope_tags 防硬套）+ 286 空 ID 回填（仅 13 转正类，候选类保持空标）+ 凡人 c203~204 D08 重标 + F6B 14 处回修 + 25 条元话术清洗 + verify。",
-          "doc": ".flow/docs/skel-v4.md",
+          "doc": ".flow/docs/f6-resume.md",
           "createdAt": "2026-10-05T00:00:00.000Z",
           "updatedAt": "2026-10-05T00:00:00.000Z",
           "location": ""
@@ -857,7 +857,7 @@
           "name": "SK06 三书新弧判类",
           "state": "planned",
           "description": "⏳ 424 新弧（凡人153/斗破65/寒门206）按新词表 76 active 判 (大类,母题)，母题清单=SK04 的 149 键禁自造；先试 30 条抽查放行；低置信走增类商讨；旧 616 不重判（SK04 映射）。前置：SK05。",
-          "doc": ".flow/docs/skel-v4.md",
+          "doc": ".flow/docs/f6-resume.md",
           "createdAt": "2026-10-05T00:00:00.000Z",
           "updatedAt": "2026-10-05T00:00:00.000Z",
           "location": ""
@@ -868,7 +868,7 @@
           "name": "SK07 rebuild v4.2",
           "state": "planned",
           "description": "⏳ can_merge_arcs 改分段档（≤3 拍 0.50/>3 拍 0.75）+cores 单向（用户拍板 A5）+单测；五段式全量 1040 弧重组入库（旧 616 用 SK04 映射+三书 424 用 SK06 判类），预计 ~790 模板/97+ 多成员；旧库归档可回滚；向量重建需网关。前置：SK05+SK06。",
-          "doc": ".flow/docs/skel-v4.md",
+          "doc": ".flow/docs/f6-resume.md",
           "createdAt": "2026-10-05T00:00:00.000Z",
           "updatedAt": "2026-10-05T00:00:00.000Z",
           "location": ""
