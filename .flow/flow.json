@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-04T07:17:17.820Z",
+  "updatedAt": "2026-10-04T07:27:52.934Z",
   "modules": {
     "0": {
       "id": "0",
@@ -807,6 +807,16 @@
           "createdAt": "2026-10-04T02:59:42.240Z",
           "updatedAt": "2026-10-04T07:17:17.820Z",
           "doc": ".flow/docs/skel-v4.md"
+        },
+        "P3": {
+          "id": "P3",
+          "type": "process",
+          "name": "P3 注入实测",
+          "description": "🟡 模板注入实测（任务单 outputs/task-DEV-P3.md 已出 2026-10-05，用户自带对话执行）。双路径：A=现网篇规划链零代码实测（口述「主角在宗门比试擂台上一战成名夺魁」→ 检索 top-4 v4 模板 → _pick_templates 注入 → 规划 → 拍板 → 生成第 1 章）；B=商讨对话手工 A/B（同一骨架块注入 vs 无注入，同模型配置，样张落 outputs/p3_inject/）。零 schema 改动，问题记 backlog。产出决定：词表合并轮开不开、扩容方向一手证据。临时测试书不碰现役书。",
+          "location": "",
+          "state": "planned",
+          "createdAt": "2026-10-04T07:27:45.144Z",
+          "updatedAt": "2026-10-04T07:27:45.145Z"
         }
       },
       "edges": {
@@ -919,6 +929,14 @@
           "createdAt": "2026-10-04T03:00:02.294Z",
           "text": "类别=身份",
           "description": "判类结果决定谁和谁同组"
+        },
+        "e16": {
+          "id": "e16",
+          "from": "SK03",
+          "to": "P3",
+          "createdAt": "2026-10-04T07:27:52.934Z",
+          "text": "616模板库",
+          "description": "v4 模板库是 P3 的被测对象"
         }
       }
     },
