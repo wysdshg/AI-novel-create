@@ -877,11 +877,22 @@
           "id": "SK05B",
           "type": "process",
           "name": "SK05b 全量复核+定义校订",
-          "state": "planned",
-          "description": "⏳ task-DEV-SK05B.md（Qoder 渠道复用 --recheck 工具链）：全量复核 239 条回填（58% 错配率实锤，外推 30~50 条错）+ 9 条低置信退空（卡点进增类需求清单）+ F03/F07 定义划界校订（F03 造已知/F07 发明新）。完成前 SK06 不开工。",
+          "state": "completed",
+          "description": "✅ 2026-10-05 关账（Qoder，QA 二审 PASS）。全量复核 242 指令=confirm 115/reclassify 88/empty 39——**改判+判空 52%，239 条回填仅 43% 站住**（关键词归并彻底证伪，坑 E20 引号正则漏抽）；实改 127 处跨 7 个 win 文件；寒门 13 新类持有 227→181；F03/F07 定义互锚划界落库+回滚往返 PASS；增类需求 166 条卡点/96 候选进下轮商讨。遗留→SK05c：1 条异议改回+5 处存量脏数据+四拍同步。",
           "doc": ".flow/docs/skel-v4.md",
           "createdAt": "2026-10-05T12:00:00.000Z",
           "updatedAt": "2026-10-05T12:00:00.000Z",
+          "location": ""
+        },
+        "SK05C": {
+          "id": "SK05C",
+          "type": "process",
+          "name": "SK05c 存量定点+四拍同步",
+          "state": "planned",
+          "description": "⏳ task-DEV-SK05C.md（OpenCode 微型单）：c1791~1792 采纳池 B 改回 F07+5 处存量脏数据定点（九星 G09 幽灵 ID+4 矛盾态）+F03/F07 四拍照新定义同步+pytest 收口。**SK06 的最后前置**。",
+          "doc": ".flow/docs/skel-v4.md",
+          "createdAt": "2026-10-05T13:00:00.000Z",
+          "updatedAt": "2026-10-05T13:00:00.000Z",
           "location": ""
         }
       },
@@ -1053,6 +1064,20 @@
           "to": "SK06",
           "text": "数据干净再判类",
           "createdAt": "2026-10-05T12:00:00.000Z"
+        },
+        "e24": {
+          "id": "e24",
+          "from": "SK05B",
+          "to": "SK05C",
+          "text": "浮出存量脏数据",
+          "createdAt": "2026-10-05T13:00:00.000Z"
+        },
+        "e25": {
+          "id": "e25",
+          "from": "SK05C",
+          "to": "SK06",
+          "text": "最后前置",
+          "createdAt": "2026-10-05T13:00:00.000Z"
         }
       }
     },
