@@ -844,8 +844,8 @@
           "id": "SK05",
           "type": "process",
           "name": "SK05 词表落地+数据整备",
-          "state": "in_progress",
-          "description": "🟡 交付大半 QA2 在途：词表 77 行（76 active+1 D08 candidate）PM 亲验一致；284 空 ID 回填 239/保持空 45；D08 重标凡人 c203~204→D01；F6B 元话术 26+回修 9；855 绿+E16/E17。待裁决：P5 口径互斥、回填质量分层（高182/中32/低25）。",
+          "state": "completed",
+          "description": "✅ 2026-10-05 关账（Qoder 渠道，QA 两轮闭环）。词表 64→77 行（76 active+1 D08）：13 新类+B07/B08/C14 转正+A04/F03 定义改写（PM 查库核验一致）；空 ID 284→回填 239→57 条抽复核实锤错配 58%→改判 30+判空 3 已落盘（台账逐条引 definition）；D08 重标凡人 c203~204→D01；F6B 元话术 26+回修 9；855 绿+E16/E17；回滚真实往返 PASS。**遗留→SK05b**：高置信 182 全量复核（外推 30~50 条错）、9 条低置信退空、F03/F07 定义校订。",
           "doc": ".flow/docs/f6-resume.md",
           "createdAt": "2026-10-05T00:00:00.000Z",
           "updatedAt": "2026-10-05T00:00:00.000Z",
@@ -871,6 +871,17 @@
           "doc": ".flow/docs/f6-resume.md",
           "createdAt": "2026-10-05T00:00:00.000Z",
           "updatedAt": "2026-10-05T00:00:00.000Z",
+          "location": ""
+        },
+        "SK05B": {
+          "id": "SK05B",
+          "type": "process",
+          "name": "SK05b 全量复核+定义校订",
+          "state": "planned",
+          "description": "⏳ task-DEV-SK05B.md（Qoder 渠道复用 --recheck 工具链）：全量复核 239 条回填（58% 错配率实锤，外推 30~50 条错）+ 9 条低置信退空（卡点进增类需求清单）+ F03/F07 定义划界校订（F03 造已知/F07 发明新）。完成前 SK06 不开工。",
+          "doc": ".flow/docs/skel-v4.md",
+          "createdAt": "2026-10-05T12:00:00.000Z",
+          "updatedAt": "2026-10-05T12:00:00.000Z",
           "location": ""
         }
       },
@@ -1028,6 +1039,20 @@
           "to": "SK07",
           "text": "判类就绪",
           "createdAt": "2026-10-04T23:23:33.000Z"
+        },
+        "e22": {
+          "id": "e22",
+          "from": "SK05",
+          "to": "SK05B",
+          "text": "抽样见58%错配",
+          "createdAt": "2026-10-05T12:00:00.000Z"
+        },
+        "e23": {
+          "id": "e23",
+          "from": "SK05B",
+          "to": "SK06",
+          "text": "数据干净再判类",
+          "createdAt": "2026-10-05T12:00:00.000Z"
         }
       }
     },
