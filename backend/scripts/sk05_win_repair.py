@@ -10,6 +10,13 @@
     .venv\\Scripts\\python.exe backend/scripts/sk05_win_repair.py --meta-apply
     .venv\\Scripts\\python.exe backend/scripts/sk05_win_repair.py --verify
 
+规范执行顺序（阶段间有真实依赖）：
+    --backfill-apply → --meta-apply → --d08-apply → --repair-apply → --recheck-apply
+  · recheck 必须在 backfill 之后，否则判空条目会被回填按关键词填回错值（脚本会直接拒跑）；
+  · meta 与 repair 都写斗破 summary，repair 台账记的「改前值」取决于谁先落盘。
+  故只保证**按此顺序重跑产物逐字节一致**（实测见 outputs/sk05/_tools/t19_idempotency_suite.py
+  的性质①②），不保证任意乱序一致。
+
 幂等口径（任务单 verify 第 4 项）：所有变换都从 *.bak-sk05 原始副本重放，
 同一输入 → 产物逐字节一致；二次 apply 不会二次加工。
 
@@ -81,6 +88,19 @@ META_SAFE_KEEP = ["留待盘问"]
 # 分句切分点含破折号：QA 实测（P1）只切标点会把
 # 「，终议定联手破封之约——未收尾」整段删掉，连带丢一句剧情事实。
 CLAUSE_SPLIT = re.compile(r"([，；。]|——|—)")
+
+
+def legal_map() -> dict[str, str]:
+    con = sqlite3.connect(f"file:{PROD_DB.as_posix()}?mode=ro", uri=True)
+    m = {r[0]: r[1] for r in con.execute("SELECT id, status FROM atomic_events")}
+    con.close()
+    return m
+
+
+def legal_ids() -> set[str]:
+    """决定一口径：76 active + D08（candidate 试用期合法使用）。"""
+    m = legal_map()
+    return {k for k, v in m.items() if v == "active"} | {"D08"}
 
 
 class _Tee:
@@ -353,31 +373,26 @@ def backfill_apply() -> int:
         ensure_backup(book)
         data = load_json(current_of(book))
         n = 0
-        in_place = 0
         for a in data["atoms"]:
             key = f"c{a.get('chapter_start')}~{a.get('chapter_end')}|{a.get('seq')}"
             if key not in mapping:
                 continue
             if (a.get("atomic_id") or "").strip():
-                if a["atomic_id"] == mapping[key]:
-                    in_place += 1
                 continue
             a["atomic_id"] = mapping[key]
             tags = [t for t in (a.get("tags") or []) if t != NOFIT_TAG]
             a["tags"] = tags
             n += 1
-            in_place += 1
         dump_json(RAW / book, data)
-        # in_place=计划该有的 ID 现在实际有多少条（重跑不变）；filled_now=本次新写几条。
-        # 只记 filled_now 会让二次跑的台账显示 0，读的人以为回填没生效。
-        stamp[book] = {"in_place": in_place, "filled_now": n,
-                       "planned": len(mapping),
+        # 台账只记**计划本身**（planned + 内容哈希）。
+        # 不记 in_place/filled_now：那俩是「落盘那一刻文件长什么样」，
+        # 而后续语义复核会合法地改掉其中 33 条的类型 → 台账就会随跑序变（t19 实测抓到）。
+        # 「是否真的到位」交给 verify 用当前文件 + 两份台账现算。
+        stamp[book] = {"planned": len(mapping),
                        "written_content_sha": content_sha(sorted(mapping.items()))}
-        print(f"   [{book}] 计划 {len(mapping)} 条 / 已到位 {in_place} 条"
-              f"（本次新写 {n} 条）→ 内容哈希 {stamp[book]['written_content_sha']}")
-    # filled_now 只进日志，不进台账：台账必须与起跑状态无关，可被任何人复现
-    ledger = {"stamp": {k: {kk: vv for kk, vv in v.items() if kk != "filled_now"}
-                        for k, v in stamp.items()}, **plan}  # filled_now 只进日志
+        print(f"   [{book}] 计划 {len(mapping)} 条 / 本次新写 {n} 条"
+              f"→ 内容哈希 {stamp[book]['written_content_sha']}（文件 sha {sha(RAW / book)}）")
+    ledger = {"stamp": stamp, **plan}
     dump_json(LEDGER, ledger)
     print(f"台账 → {LEDGER}")
     return 0
@@ -455,7 +470,7 @@ def meta_dry() -> int:
         print(f"\n  {r['book']} {r['chapter']} seq{r['seq']} 命中{r['phrases']}")
         print(f"    删句: …{r['dropped']}")
         print(f"    改后尾: …{r['new_summary'][-60:]}")
-    dump_json(OUT / "元话术清洗计划_dry.json", {"rows": rows})
+    dump_json(OUT / "元话术清洗计划_dry.json", {"book": BOOKS_META, "rows": rows})
     print(f"\n计划 → {OUT / '元话术清洗计划_dry.json'}")
     return 0
 
@@ -558,7 +573,8 @@ def d08_apply() -> int:
     ensure_backup(r["book"])
     dump_json(RAW / r["book"], data)
     print(f"[apply] {r['book']} c{r['cs']}~{r['ce']} seq{r['seq']} → {r['to_id']} "
-          f"tags={a['tags']} sha={sha(RAW / r['book'])}")
+          f"tags={a['tags']} 内容哈希={content_sha([a['atomic_id'], a['tags']])} "
+          f"（文件 sha {sha(RAW / r['book'])}）")
     path = OUT / "D08重标台账.json"
     dump_json(path, {"decision": r, "atom_index": i,
                      "written_content_sha": content_sha(
@@ -655,9 +671,22 @@ def repair_apply() -> int:
                # P2：台账必须自带改前/改后，否则交付物无法自证（QA 只能反查 .bak）
                "old_summary": it.get("old_summary", ""), "new_summary": it.get("new_summary", ""),
                "old_tags": it.get("old_tags"), "new_tags": it.get("new_tags")}
+        cur = [a for a in data["atoms"] if (a.get("chapter_start"), a.get("chapter_end"),
+                                            a.get("seq")) == (it.get("chapter_start"),
+                                                               it.get("chapter_end"),
+                                                               it.get("seq"))]
         if "属实" not in rec["verdict"]:
             rec["status"] = "misreport-not-changed"
-            print(f"  [误报不改] {rec['issue']} seq{rec['seq']}")
+            # QA P8：这里原先直接抄子代理结论，导致台账写出「文件里根本没有的 tags」
+            # 和「从未落盘的 new_summary」。误报记录必须以文件真实态为准，
+            # 子代理建议改成的文本另存 proposed_*，不与已生效字段混写。
+            if cur:
+                rec["old_summary"] = cur[0].get("summary", "")
+                rec["old_tags"] = list(cur[0].get("tags") or [])
+            rec["proposed_new_summary"] = rec.pop("new_summary", "")
+            rec["proposed_new_tags"] = rec.pop("new_tags", None)
+            print(f"  [误报不改] {rec['issue']} seq{rec['seq']}（文件保持原样，"
+                  f"子代理建议文本另存 proposed_*）")
             records.append(rec)
             continue
         errs = repair_validate(it)
@@ -705,7 +734,9 @@ def repair_apply() -> int:
     n_ap = sum(1 for r in records if r["status"] == "in-place")
     n_now = sum(1 for r in records if r.get("_changed_now"))
     n_ms = sum(1 for r in records if r["status"] == "misreport-not-changed")
-    print(f"到位 {n_ap} 条（本次新写 {n_now} 条）/ 误报不改 {n_ms} 条 → sha {sha(RAW / BOOK_DP)}")
+    rec_sha = content_sha([[r["chapter"], r["seq"], r.get("new_summary", "")] for r in records])
+    print(f"到位 {n_ap} 条（本次新写 {n_now} 条）/ 误报不改 {n_ms} 条 "
+          f"→ 内容哈希 {rec_sha}（文件 sha {sha(RAW / BOOK_DP)}）")
     print(f"台账 → {OUT / 'F6B回修台账.json'}")
     return 0
 
@@ -758,7 +789,7 @@ def rescan() -> int:
     dump_json(OUT / "A04F03复扫.json", out)
     print("== A04/F03 存量复扫 ==")
     print("用量:", {k: v["合计"] for k, v in out["counts"].items()},
-          "（三书口径见 verify：A04=111 / F03=35）")
+          "（全库 10 书口径；三书口径由 verify 按 SK04 基线 ± 复核净增现算）")
     print(f"F03 可疑（无造物语素）{len(out['suspicious']['F03'])} 条；"
           f"A04 可疑（双向语素全无）{len(out['suspicious']['A04'])} 条 —— 全库口径")
     for r in out["suspicious"]["F03"]:
@@ -767,6 +798,171 @@ def rescan() -> int:
         print(f"   A04 {r['book']} {r['chapter']}: {r['summary'][:70]}")
     print("SK04 §2.4 点名的借用噪声:", out["notes"]["SK04§2.4 点名的 F03 借用噪声"])
     print(f"→ {OUT / 'A04F03复扫.json'}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 二·补4、回填语义复核落盘（PM 裁决决定二：低 25 + 中 32 = 57 条）
+#   子代理只读判类，结论在 _work/recheck_out_*.json；本段负责校验 + 落盘 + 出台账。
+# ---------------------------------------------------------------------------
+RECHECK_DIR = OUT / "_work"
+
+
+def recheck_items() -> list[dict]:
+    items = []
+    for f in sorted(RECHECK_DIR.glob("recheck_out_*.json")):
+        doc = load_json(f)
+        for it in doc.get("items", []):
+            it["_src"] = f.name
+            items.append(it)
+    return items
+
+
+def recheck_plan() -> tuple[list[dict], list[str]]:
+    """返回 (可执行条目, 拒绝原因列表)。校验：ID 合法、定位唯一、verdict 合法。"""
+    legal = legal_ids()
+    data = load_json(current_of(BOOK_HM))
+    idx = {}
+    for a in data["atoms"]:
+        idx.setdefault((a.get("chapter_start"), a.get("chapter_end"), a.get("seq")), []).append(a)
+    out, errs = [], []
+    for it in recheck_items():
+        v = it.get("verdict")
+        cs, ce = None, None
+        for tok in re.findall(r"(\d+)~(\d+)", str(it.get("chapter", ""))):
+            cs, ce = int(tok[0]), int(tok[1])
+        if cs is None:
+            errs.append(f"{it.get('chapter')} seq{it.get('seq')}: 章节解析失败")
+            continue
+        hit = idx.get((cs, ce, it.get("seq")), [])
+        if len(hit) != 1:
+            errs.append(f"c{cs}~{ce} seq{it.get('seq')}: 定位命中 {len(hit)} 条")
+            continue
+        if v == "confirm":
+            tgt = it.get("backfilled_id")
+            add_tag = None
+        elif v == "reclassify":
+            tgt = it.get("new_id")
+            add_tag = None
+        elif v == "empty":
+            tgt = ""
+            add_tag = NOFIT_TAG
+        else:
+            errs.append(f"c{cs}~{ce} seq{it.get('seq')}: verdict 非法 {v!r}")
+            continue
+        if tgt and tgt not in legal:
+            errs.append(f"c{cs}~{ce} seq{it.get('seq')}: ID {tgt!r} 不在词表（76 active + D08）内")
+            continue
+        if tgt and tgt == hit[0].get("atomic_id") and v == "confirm":
+            pass  # 确认项也要进台账，但无需改写
+        cur_id = it.get("backfilled_id")          # 台账口径：取**回填计划值**，与跑序无关
+        live_id = hit[0].get("atomic_id") or ""   # 校验口径：取文件现值
+        if v == "confirm" and live_id != cur_id:
+            errs.append(f"c{cs}~{ce} seq{it.get('seq')}: 标注 confirm 但现值 {live_id!r} "
+                        f"≠ 回填值 {cur_id!r}（文件被外部改过？）")
+            continue
+        out.append({**it, "cs": cs, "ce": ce, "target_id": tgt, "add_tag": add_tag,
+                    # 台账里的「原值」= 回填计划值（与跑序无关）；文件现值另存供核对
+                    "current_id": it.get("backfilled_id"), "live_id_at_check": cur_id})
+    return out, errs
+
+
+def recheck_dry() -> int:
+    items, errs = recheck_plan()
+    from collections import Counter
+    vc = Counter(i["verdict"] for i in items)
+    print("== 回填语义复核 dry-run（PM 决定二：57 条）==")
+    print(f"收到结论 {len(items)} 条  分布 {dict(vc)}")
+    print(f"其中需改写文件 {sum(1 for i in items if i['verdict'] != 'confirm')} 条，"
+          f"确认不改 {vc.get('confirm', 0)} 条")
+    if errs:
+        print(f"\n校验拒绝 {len(errs)} 条：")
+        for e in errs:
+            print("   ", e)
+    print("\n改判去向（旧ID → 新ID）:")
+    pair = Counter(f"{i['current_id']}→{i['target_id'] or '∅'}" for i in items
+                   if i["verdict"] != "confirm")
+    for k, v in sorted(pair.items(), key=lambda x: -x[1]):
+        print(f"   {v:2d}  {k}")
+    lowconf = [i for i in items if i.get("confidence") == "低"]
+    print(f"\n子代理自报低置信 {len(lowconf)} 条（这些改判本身也弱，PM 可再裁）:")
+    for i in lowconf:
+        print(f"   {i['current_id']}→{i['target_id'] or '∅'} {i['chapter']} seq{i['seq']}")
+    return 0 if items and not errs else 1
+
+
+def recheck_apply() -> int:
+    # 顺序依赖：复核是在「回填结果」上做改判。若 backfill 还没跑（寒门仍有大量空 ID），
+    # 先跑复核会把判空条目落空、随后 backfill 又按关键词把它们填回错值。
+    fresh_empty = sum(1 for a in load_json(current_of(BOOK_HM))["atoms"]
+                      if not (a.get("atomic_id") or "").strip())
+    if fresh_empty > 60:
+        print(f"[apply] 拒绝：寒门仍有 {fresh_empty} 个空 ID（基线 280），"
+              "说明 --backfill-apply 还没跑；复核必须在其之后，否则会被回填覆盖回错值")
+        return 1
+    items, errs = recheck_plan()
+    if errs:
+        print(f"[apply] 有 {len(errs)} 条校验不过，未写任何文件：")
+        for e in errs:
+            print("   ", e)
+        return 1
+    if not items:
+        print("[apply] 没有可执行条目（复核结论未落盘？）")
+        return 1
+    data = load_json(current_of(BOOK_HM))
+    n_write = 0
+    for it in items:
+        if it["verdict"] == "confirm":
+            continue
+        for a in data["atoms"]:
+            if (a.get("chapter_start"), a.get("chapter_end"), a.get("seq")) == (
+                    it["cs"], it["ce"], it["seq"]):
+                if a.get("atomic_id") != it["target_id"]:
+                    a["atomic_id"] = it["target_id"]
+                    n_write += 1
+                tags = [t for t in (a.get("tags") or []) if t != NOFIT_TAG]
+                if it["add_tag"] and it["add_tag"] not in tags:
+                    tags.append(it["add_tag"])
+                a["tags"] = tags
+                break
+    ensure_backup(BOOK_HM)
+    dump_json(RAW / BOOK_HM, data)
+    stamp = {"in_place": sum(1 for it in items
+                             if next(a for a in data["atoms"] if (a.get("chapter_start"),
+                                                                   a.get("chapter_end"),
+                                                                   a.get("seq")) ==
+                                   (it["cs"], it["ce"], it["seq"]))["atomic_id"]
+                             == (it["target_id"] or "")),
+             "planned": len(items),
+             "written_content_sha": content_sha(
+                 sorted([it["chapter"], it["seq"], it["target_id"]] for it in items))}
+    dump_json(OUT / "回填复核台账.json",
+              {"book": BOOK_HM, "scope": "PM 裁决决定二：低 25 + 中 32 = 57 条",
+               "stamp": stamp,
+               "records": [{k: it.get(k) for k in
+                            ("chapter", "seq", "tier", "verdict", "backfilled_id",
+                             "current_id", "target_id", "confidence", "main_thread",
+                             "reason", "evidence", "category", "nofit_what",
+                             "competing_categories", "_src")}
+                           for it in sorted(items, key=lambda x: (x["chapter"], x["seq"]))]})
+    md = io.StringIO()
+    md.write("# [DEV-SK05] 回填语义复核台账（PM 裁决决定二：低 25 + 中 32 = 57 条）\n\n")
+    md.write(f"> 复核执行方：4 个只读子代理（逐条读 summary 对照 77 行词表 definition 重判）"
+             f"｜落盘：本单 `--recheck-apply`\n")
+    md.write(f"> 结论：**确认 {sum(1 for i in items if i['verdict']=='confirm')} 条 / "
+             f"改判 {sum(1 for i in items if i['verdict']=='reclassify')} 条 / "
+             f"判空 {sum(1 for i in items if i['verdict']=='empty')} 条**"
+             f"（风险子集错配率 "
+             f"{(sum(1 for i in items if i['verdict'] != 'confirm') * 100) // max(len(items),1)}%）\n\n")
+    md.write("| 章节 | seq | 档 | 回填值 | 复核值 | 判定 | 置信 | 依据（引 definition） |\n")
+    md.write("|---|---|---|---|---|---|---|---|\n")
+    for it in sorted(items, key=lambda x: (x["chapter"], x["seq"])):
+        md.write(f"| {it['chapter']} | {it['seq']} | {it.get('tier')} | {it['current_id']} "
+                 f"| {it['target_id'] or '（空）'} | {it['verdict']} | {it.get('confidence')} "
+                 f"| {str(it.get('reason', '')).replace(chr(10), ' ')[:90]} |\n")
+    (OUT / "回填复核台账.md").write_text(md.getvalue(), encoding="utf-8")
+    print(f"[apply] 改写 {n_write} 处 / 复核条目 {len(items)} 条 → sha {sha(RAW / BOOK_HM)}")
+    print(f"台账 → {OUT / '回填复核台账.md'} 与 .json")
     return 0
 
 
@@ -780,14 +976,15 @@ def verify() -> int:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}"
               f"{(' — ' + str(detail)) if detail else ''}")
 
-    con = sqlite3.connect(f"file:{PROD_DB.as_posix()}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    ids = {r["id"]: r["status"] for r in con.execute(f"SELECT id, status FROM atomic_events")}
-    con.close()
-    legal = set(ids)
+    ids = legal_map()
+    # PM 裁决决定一：越界口径 = 「76 active + D08（candidate 试用期合法使用）」。
+    # 依据：「candidate 可试用」是 F6C 单明文规矩，D08 不转正是**用量孤例不够统计门槛**，
+    # 不是语义错误——统计问题与合规性是两回事；若将来转正，这 1 条自动合法、零返工。
+    TRIAL_OK = {"D08"}
+    legal = {k for k, v in ids.items() if v == "active"} | TRIAL_OK
     act = {k for k, v in ids.items() if v == "active"}
-    chk("库词表口径", len(act) == 76 and len(legal) == 77,
-        f"active {len(act)} / 总 {len(legal)}")
+    chk("库词表口径", len(act) == 76 and len(ids) == 77,
+        f"active {len(act)} / 总 {len(ids)}；越界判据 = active ∪ {sorted(TRIAL_OK)}")
 
     total_empty, cand_left = 0, []
     for book in BOOKS_ALL:
@@ -809,8 +1006,27 @@ def verify() -> int:
         for a in empty:
             cand_left.append((book, a.get("chapter_start"), a.get("chapter_end"),
                               tuple(a.get("tags") or [])))
-    chk("三书空 ID 合计 = 45（寒门 41 + 斗破 3 + 凡人 p2 1）", total_empty == 45,
-        f"实测 {total_empty}")
+    # 期望值随语义复核动态变化：复核判空的条目要退回空 ID，所以基线 + 判空数
+    rc_empty = 0
+    if (OUT / "回填复核台账.json").exists():
+        rc_empty = sum(1 for r in load_json(OUT / "回填复核台账.json")["records"]
+                       if r.get("verdict") == "empty")
+    want_empty = 45 + rc_empty
+    # 三书空 ID 合计：SK05 终态 48。⚠️ 若 [DEV-SK05B] 全量复核已落盘（会合法改判/退空更多条目），
+    # 这几项数字基线就不再属于 SK05 时点——明示跳过而不是让检查恒红，权威口径改跑
+    # `sk05b_recheck_full.py --verify`。
+    post_sk05b = (ROOT / "outputs" / "sk05b" / "全量复核台账.json").exists()
+
+    def chk_or_skip(name, ok, detail="", reason="SK05B 已改写基线"):
+        if post_sk05b:
+            print(f"  [SKIP] {name} — {reason}，权威口径见 sk05b_recheck_full.py --verify"
+                  f"（本项现值 {detail}）")
+            return
+        chk(name, ok, detail)
+
+    chk_or_skip(f"三书空 ID 合计 = {want_empty}"
+                f"（45 基线 + 复核判空 {rc_empty}）", total_empty == want_empty,
+                f"实测 {total_empty}")
     # QA P5：任务单 §三.1 写「76 active 口径」，但 §一.2 又明令 D08 维持 candidate 不动，
     # 而斗破 c1421~1423 语义上确实最贴 D08。三条口径互斥 → 不自判，只把引用数报出来。
     cand = {i for i, st in ids.items() if st != "active"}
@@ -818,15 +1034,28 @@ def verify() -> int:
             for b in BOOKS_ALL
             for a in load_json(RAW / b)["atoms"]
             if (a.get("atomic_id") or "") in cand]
-    print(f"  [上报] 引用 candidate ID 的原子 = {len(refs)} 处 {refs}"
-          f"（判越界用的是 {len(legal)} 全表口径；若按 76 active 口径这些即算越界，待 PM 裁）")
+    print(f"  [单列统计] candidate 试用期用量 = {len(refs)} 处 {refs}"
+          f" —— 按裁决决定一计为合法试用，不计越界；D08 转正门槛是统计问题，此数即证据")
     if LEDGER.exists():
         lg = load_json(LEDGER)
         st = lg.get("stamp", {}).get(BOOK_HM, {})
-        planned_bf = sum(1 for r in lg.get("rows", []) if r["action"] == "backfill")
-        chk("回填台账自洽：计划数 = 已到位数 = 239",
-            st.get("planned") == st.get("in_place") == planned_bf == 239,
-            json.dumps(st, ensure_ascii=False))
+        bf = [r for r in lg.get("rows", []) if r["action"] == "backfill"]
+        rc = (load_json(OUT / "回填复核台账.json").get("records", [])
+              if (OUT / "回填复核台账.json").exists() else [])
+        moved = sum(1 for r in rc if r.get("verdict") != "confirm")
+        by_key = {(a.get("chapter_start"), a.get("chapter_end"), a.get("seq")): a
+                  for a in load_json(RAW / BOOK_HM)["atoms"]}
+
+        def chapter_pair(txt):
+            n = re.findall(r"(\d+)", str(txt))
+            return (int(n[0]), int(n[1])) if len(n) >= 2 else (None, None)
+        # 到位数 = 仍持有回填值的原子数；复核改走的那 33 条本就该不在此列
+        holding = sum(1 for r in bf
+                      if by_key.get((*chapter_pair(r["chapter"]), r["seq"]),
+                                    {}).get("atomic_id") == r["new_id"])
+        chk_or_skip("回填计划 239 条：仍持回填值 = 239 − 复核改走数",
+            st.get("planned") == len(bf) == 239 and holding == 239 - moved,
+            f"planned={st.get('planned')} 持有={holding} 复核改走={moved}")
     else:
         chk("回填台账存在", False, str(LEDGER))
 
@@ -844,6 +1073,17 @@ def verify() -> int:
     chk("剧情用语「留待盘问」未被误删", keep_ok)
 
     # A04/F03 存量标注复扫（机检口径：用量对账 + 矛盾态）
+    # A04/F03 存量标注复扫（§二.2 口径：SK04 §2.5 矩阵是**回填/复核前**的基线，
+    # 语义复核会把空原子改判进老类，所以期望值要加上复核带来的净流入/净流出）
+    delta = {"A04": 0, "F03": 0}
+    if (OUT / "回填复核台账.json").exists():
+        for r in load_json(OUT / "回填复核台账.json")["records"]:
+            if r.get("verdict") == "confirm":
+                continue
+            for key in ("current_id", "target_id"):
+                v = r.get(key)
+                if v in delta:
+                    delta[v] += 1 if key == "target_id" else -1
     counts = {}
     for book in BOOKS_ALL:
         for a in load_json(RAW / book)["atoms"]:
@@ -852,9 +1092,11 @@ def verify() -> int:
             counts[a.get("atomic_id") or "__empty__"][1][book] = \
                 counts[a.get("atomic_id") or "__empty__"][1].get(book, 0) + 1
     for _id, want in (("A04", 111), ("F03", 35)):
+        expect = want + delta[_id]
         got = counts.get(_id, [0])[0]
-        chk(f"{_id} 三书用量对账 = {want}（SK04 §2.5 矩阵）", got == want,
-            f"实测 {got}，分布 {counts.get(_id, [0, {}])[1]}")
+        chk_or_skip(f"{_id} 三书用量对账 = {expect}"
+            f"（SK04 基线 {want} {delta[_id]:+d} 复核净增）",
+            got == expect, f"实测 {got}，分布 {counts.get(_id, [0, {}])[1]}")
 
     # D08 重标（§二.2）
     d08 = {b: [(a.get("chapter_start"), a.get("chapter_end")) for a in load_json(RAW / b)["atoms"]
@@ -881,6 +1123,8 @@ def main() -> None:
     g.add_argument("--d08-apply", action="store_true")
     g.add_argument("--repair-dry", action="store_true")
     g.add_argument("--repair-apply", action="store_true")
+    g.add_argument("--recheck-dry", action="store_true")
+    g.add_argument("--recheck-apply", action="store_true")
     g.add_argument("--rescan", action="store_true")
     g.add_argument("--verify", action="store_true")
     a = ap.parse_args()
@@ -888,6 +1132,7 @@ def main() -> None:
             else "meta_dry" if a.meta_dry else "meta_apply" if a.meta_apply
             else "d08_dry" if a.d08_dry else "d08_apply" if a.d08_apply
             else "repair_dry" if a.repair_dry else "repair_apply" if a.repair_apply
+            else "recheck_dry" if a.recheck_dry else "recheck_apply" if a.recheck_apply
             else "rescan" if a.rescan else "verify")
     OUT.mkdir(parents=True, exist_ok=True)
     sys.stdout = _Tee(OUT / f"sk05_win_{mode}.txt")
@@ -896,7 +1141,9 @@ def main() -> None:
           "meta_dry": meta_dry, "meta_apply": meta_apply,
           "d08_dry": d08_dry, "d08_apply": d08_apply,
           "repair_dry": repair_dry, "repair_apply": repair_apply,
-          "rescan": rescan, "verify": verify}[mode]()
+          "rescan": rescan,
+          "recheck_dry": recheck_dry, "recheck_apply": recheck_apply,
+          "verify": verify}[mode]()
     print(f"[DEV-SK05] {mode} rc={rc}")
     sys.stdout.flush()
     sys.exit(rc)

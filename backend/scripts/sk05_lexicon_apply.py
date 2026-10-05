@@ -589,11 +589,18 @@ def restore_check(con: sqlite3.Connection) -> int:
         if not old:
             continue
         def lit(col):
+            """按**原文**回填字面量。
+
+            QA P9：`scope_tags` 列虽然声明成 JSON，但 64 行存量存的是 4 个字符的文本
+            `null`（`typeof()` 实测 = text），不是 SQL NULL。
+            原先走 `json.dumps(v)` 会把它变成 6 个字符的 `"null"`，
+            回滚后这 5 行与备份不再逐字节相等——还原从"精确"退化成"近似"。
+            所以这里一律 str() 原样 + 单引号转义，只有真正的 None 才写裸 NULL。
+            """
             v = old[col]
             if v is None:
-                return "NULL"          # scope_tags 存量是 SQL NULL，不是字符串 "null"
-            txt = json.dumps(v, ensure_ascii=False) if col == "scope_tags" else str(v)
-            return "'" + txt.replace("'", "''") + "'"   # 单引号字面量，严格模式也成立
+                return "NULL"
+            return "'" + str(v).replace("'", "''") + "'"
         sets = ", ".join(f"{c}={lit(c)}" for c in COLUMNS if c not in ("id", "created_at"))
         sql.append(f"UPDATE {TABLE} SET {sets} WHERE id={_id!r};")
     (ROLLBACK).write_text("\n".join(sql), encoding="utf-8")
