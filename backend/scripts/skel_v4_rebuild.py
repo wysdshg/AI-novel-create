@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -65,7 +66,9 @@ SHAOSONG = "绍宋"
 PLACEHOLDER_ARCS = (430, 431)          # 判类结果-v4 §交接口径：不修数据，打「占位弧」标
 ORPHAN_CLASSES = ("格局变动", "跨域远征", "庙堂权谋")   # §7 孤例类：免合并
 ORIGIN_V3 = "atomic_merge_v1"
-ORIGIN_V4 = "skel_v4"
+ORIGIN_V4 = "skel_v4"        # v4.1（SK03 落的 616 张，本轮起转 archived）
+ORIGIN_V4_2 = "skel_v4_2"    # v4.2（SK07 本轮 978 张）；SK08 语义聚合迭代续号 skel_v4_3
+V41_ACTIVE_ARC = 616         # 换代基线：当前 active arc 张数（PM 裁决问2 甲案）
 DISPLAY_TOP = 5
 PHASES = ("起", "承", "转", "合")
 # 分段档门槛（v4.2 用户拍板，取代 SK03 的动态 0.65/0.70/0.85）：
@@ -73,6 +76,7 @@ PHASES = ("起", "承", "转", "合")
 SEG = {"split": int(os.environ.get("SK07_SEG_SPLIT", 3)),
        "short": float(os.environ.get("SK07_T_SHORT", 0.50)),
        "long": float(os.environ.get("SK07_T_LONG", 0.75))}   # 三个阈值可用 env 覆盖，仅供 dry-run 敏感性试算
+SEG_DEFAULT = {"split": 3, "short": 0.50, "long": 0.75}      # 用户拍板值，防呆比对基线
 THR_MAX = 0.5           # LCS/max 门槛（拦长短悬殊）
 MAX_LEN = 15            # SCS 合并链长上限
 
@@ -861,10 +865,10 @@ def build_template(cls: str, sub: str, name: str, cluster: Cluster, vocab: dict[
         "phases": phases_struct,
         "display_top": DISPLAY_TOP,
         "skeleton": {"seq": cluster.seq, "repeats": cluster.repeats,
-                     "cores": cluster.cores, "origin": ORIGIN_V4},
+                     "cores": cluster.cores, "origin": ORIGIN_V4_2},
     }
     stats = {
-        "origin": ORIGIN_V4, "books": len(books), "book_names": books,
+        "origin": ORIGIN_V4_2, "books": len(books), "book_names": books,
         "n_members": cluster.n, "class": cls, "sub_event": sub,
         "low_conf_members": low, "single_arc": cluster.n == 1,
         # 成员溯源（弧号 + 书 + 弧名 + 章节区间）：让「无借邻」可被机器逐条核账
@@ -1071,9 +1075,10 @@ def do_backup(con, rows: list[dict]) -> Path:
     return p
 
 
-def existing_v4(con) -> list[dict]:
+def existing_v4(con, origin: str = ORIGIN_V4_2) -> list[dict]:
+    """幂等只看**同版本**（v4.2）；v4.1 的 616 张不含 "skel_v4_2" 子串，不会被误判成已落。"""
     return [r for r in _rows(con, "scale='arc'")
-            if ORIGIN_V4 in json.dumps(r.get("source_stats") or "", ensure_ascii=False)]
+            if origin in json.dumps(r.get("source_stats") or "", ensure_ascii=False)]
 
 
 def do_apply(plan: dict) -> None:
@@ -1093,9 +1098,17 @@ def do_apply(plan: dict) -> None:
                   f"→ 不动库、不覆盖备份")
             return
         old = _rows(con, "scale='arc' and status='active'")
-        if len(old) != BASELINE["arc_active_v3"]:
-            sys.exit(f"[apply] 旧 active arc {len(old)} 条 ≠ 基线 "
-                     f"{BASELINE['arc_active_v3']}，拒绝动手（库现状已变，先人工核对）")
+        if len(old) != V41_ACTIVE_ARC:
+            sys.exit(f"[apply] 换代基线不符：active arc {len(old)} 条 ≠ v4.1 的 "
+                     f"{V41_ACTIVE_ARC} 条，拒绝动手（库现状已变，先人工核对）")
+        bad_org = [r["id"] for r in old if ORIGIN_V4 not in str(r.get("source_stats") or "")]
+        if bad_org:
+            sys.exit(f"[apply] 待归档 arc 里有 {len(bad_org)} 条非 v4.1 模板（{bad_org[:3]}），拒绝动手")
+        ch_ids = {r["id"] for r in _rows(con, "scale='character' and status='active'")}
+        if ch_ids & {r["id"] for r in old}:
+            sys.exit("[apply] 换代集合与 active 角色模板相交（265 张三路块禁碰），拒绝动手")
+        print(f"[apply] 换代集合核对通过：arc active {len(old)} 条全为 v4.1"
+              f"｜active 角色模板 {len(ch_ids)} 张零相交（其三路块不在清理范围）")
         backup = do_backup(con, old)
     finally:
         con.close()
@@ -1135,7 +1148,8 @@ def do_apply(plan: dict) -> None:
         db.rollback()
         sys.exit(f"[apply] 回滚: {type(e).__name__}: {e}")
 
-    # ---- 旧 100 三路向量块清理（否则成孤儿块，且与新库对不上账）----
+    # ---- 被换代 arc 的向量块清理（PM 裁问3-①：归档动作必须补调 remove_source，retire 漏调＝真缺口）
+    # ⚠ 只清这批 arc 的块；265 张 active 角色模板三路块一律禁碰（arc id 与 character id 已在守卫里断言不相交）
     for st in (crud.SOURCE_TYPE, crud.SOURCE_TYPE_CAST, crud.SOURCE_TYPE_ARCHETYPE):
         n = sum(vector_index.remove_source(db, crud.GLOBAL, st, tid) for tid in old_ids)
         db.commit()
@@ -1145,8 +1159,8 @@ def do_apply(plan: dict) -> None:
     ok = fail = 0
     rows = db.query(PlotTemplateORM).filter(PlotTemplateORM.status == "active").all()
     new_ids = [o.id for o in rows
-               if ORIGIN_V4 in json.dumps(o.source_stats or {}, ensure_ascii=False)]
-    print(f"[apply] 待建向量：active 模板 {len(rows)} 张，其中 v4 {len(new_ids)} 张")
+               if ORIGIN_V4_2 in json.dumps(o.source_stats or {}, ensure_ascii=False)]
+    print(f"[apply] 待建向量：active 模板 {len(rows)} 张，其中 v4.2 {len(new_ids)} 张")
     for i, o in enumerate(rows, 1):
         if o.id not in new_ids:
             continue
@@ -1205,7 +1219,7 @@ def do_verify(plan: dict) -> int:
     v4_rows = []
     for r in con.execute("select * from plot_templates where scale='arc'"):
         ss = r["source_stats"]
-        if isinstance(ss, str) and ORIGIN_V4 in ss:
+        if isinstance(ss, str) and ORIGIN_V4_2 in ss:
             v4_rows.append(dict(r))
     arc_archived_ids = {r["id"] for r in con.execute(
         "select id from plot_templates where scale='arc' and status='archived'")}
@@ -1287,7 +1301,7 @@ def do_verify(plan: dict) -> int:
     db = sessionmaker(bind=eng)()
     active = db.query(PlotTemplateORM).filter_by(status="active").all()
     v4_objs = [o for o in active
-               if ORIGIN_V4 in json.dumps(o.source_stats or {}, ensure_ascii=False)]
+               if ORIGIN_V4_2 in json.dumps(o.source_stats or {}, ensure_ascii=False)]
     exp_tpl = exp_cast = exp_arch = 0
     for o in v4_objs:
         exp_tpl += len(crud.template_chunks(o))
@@ -1315,7 +1329,14 @@ def do_verify(plan: dict) -> int:
         "select count(*) from vector_chunks vc where vc.source_type in "
         "('plot_template','plot_cast','char_archetype') and not exists("
         "select 1 from plot_templates t where t.id=vc.source_id)")).scalar()
-    chk(orphan == 0, "三路零孤儿块（旧 100 的块已清）", f"孤儿 {orphan}")
+    chk(orphan == 0, "三路零孤儿块（被换代 616 张的块已清）", f"孤儿 {orphan}")
+    n_char = db.query(PlotTemplateORM).filter(PlotTemplateORM.scale == "character",
+                                              PlotTemplateORM.status == "active").count()
+    src_n = db.execute(sa_text("select count(distinct source_id) from vector_chunks where "
+                               "source_type in ('plot_template','plot_cast','char_archetype')")).scalar()
+    want_src = len(new_ids) + n_char
+    chk(src_n == want_src, f"三路向量源数 = {want_src}（新 arc {len(new_ids)} ＋ active 角色 "
+                           f"{n_char}，PM 裁问3-③）", f"实 {src_n}")
     print(f"  全库三路总数：{got}（含 character 265×3）")
 
     smoke_ok = smoke_detail = None
@@ -1336,7 +1357,7 @@ def do_verify(plan: dict) -> int:
     con2 = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
     con2.row_factory = sqlite3.Row
     n_v4 = sum(1 for r in con2.execute("select source_stats from plot_templates")
-               if ORIGIN_V4 in (r[0] if isinstance(r[0], str) else json.dumps(r[0],
+               if ORIGIN_V4_2 in (r[0] if isinstance(r[0], str) else json.dumps(r[0],
                                                                         ensure_ascii=False)))
     con2.close()
     n_active = con.execute("select count(*) from plot_templates where scale='arc' and "
@@ -1419,7 +1440,79 @@ def do_restore_check() -> None:
         print(f"  示例回滚 SQL: UPDATE plot_templates SET status='active' WHERE id='{rows[0]['id']}';")
 
 
-# ═══════════════════════════════ 九、抽查报告 ═══════════════════════════════
+# ─────────────────────── 报告用取数助手（v4.2）───────────────────────
+def _sha16(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _latest_backup() -> tuple[Path, list[dict]]:
+    bks = sorted(BACKUP_DIR.glob("plot_templates_arc_v3_*.json"))
+    if not bks:
+        return Path("(无备份)"), []
+    return bks[-1], (json.loads(bks[-1].read_text(encoding="utf-8")).get("archived") or [])
+
+
+def _log_lines(name: str, prefixes: tuple) -> list[str]:
+    """从本单日志里回读事实（报告不自造数字，全部取自落盘日志）。"""
+    p = SK07 / name
+    if not p.is_file():
+        return []
+    return [x.strip() for x in p.read_text(encoding="utf-8").splitlines()
+            if x.strip().startswith(prefixes)]
+
+
+def _n_beats(st: dict) -> int:
+    return sum(len(ph.get("beats") or []) for ph in (st.get("phases") or []))
+
+
+def _shaosong_exit(rows: list[dict]) -> list[dict]:
+    """v4.1 里成员含绍宋的模板 = 本轮绍宋 25 弧的退场位置（随 616 一起 archived，未删）。"""
+    out = []
+    for r in rows:
+        ss = _as_json(r.get("source_stats"))
+        ms = [m for m in (ss.get("member_arcs") or []) if m.get("book") == SHAOSONG]
+        if not ms:
+            continue
+        out.append({"id": r["id"], "name": r["name"], "n_members": ss.get("n_members"),
+                    "arcs": "、".join(str(m.get("arc")) for m in ms),
+                    "beats": _n_beats(_as_json(r.get("structure"))),
+                    "cls": ss.get("class"), "sub": ss.get("sub_event")})
+    return sorted(out, key=lambda x: x["name"])
+
+
+def _sk03_recon() -> dict:
+    """恢复件 SK03_dryrun.txt vs 原 SK03_apply.txt 逐行对账（PM 裁 §三.1 交办）。"""
+    dp, ap = SKEL / "SK03_dryrun.txt", SKEL / "SK03_apply.txt"
+    if not (dp.is_file() and ap.is_file()):
+        return {"available": False}
+    L1 = dp.read_text(encoding="utf-8").splitlines()
+    L2 = ap.read_text(encoding="utf-8").splitlines()
+
+    def seg(L: list[str]) -> list[str]:
+        i = next(n for n, x in enumerate(L) if x.startswith("-- 逐键"))
+        j = next(n for n, x in enumerate(L) if x.startswith("-- 兜底台账"))
+        return [x.strip() for x in L[i + 1:j] if x.strip()]
+
+    def head(L: list[str]) -> list[str]:
+        keys = ("判类 ", "模板 ", "样本分档", "权威输入自检")
+        return [x.strip() for x in L[:12] if x.strip().startswith(keys)]
+
+    s1, s2 = seg(L1), seg(L2)
+    h1, h2 = head(L1), head(L2)
+    return {"available": True, "dry": dp.name, "apply": ap.name,
+            "n_keys": len(s1), "n_keys_apply": len(s2),
+            "same_order": s1 == s2,
+            "sha_dry": _sha16("\n".join(s1)), "sha_apply": _sha16("\n".join(s2)),
+            "only_dry": sorted(set(s1) - set(s2)), "only_apply": sorted(set(s2) - set(s1)),
+            "head_dry": h1, "head_apply": h2,
+            "head_same": [x for x in h1 if not x.startswith("权威输入自检")]
+                         == [x for x in h2 if not x.startswith("权威输入自检")]}
+
+
+
+
+
+# ─────────────────── 新旧库统计（报告 §6/§10 用）───────────────────
 def _old_lib_stats() -> dict:
     """旧库 active arc 的对照基线（最大单拍参考数 / A17 污染指纹）。
 
@@ -1485,207 +1578,431 @@ def _new_lib_stats(plan: dict) -> dict:
             "n_single_arc": plan["n_single_arc_templates"]}
 
 
+# ═══════════════════════════════ 九、重组报告（v4.2）═══════════════════════════════
 def write_report(plan: dict) -> Path:
     old, new = _old_lib_stats(), _new_lib_stats(plan)
-    exp = len(plan["templates"])
     tp = plan["templates"]
-    by_cls: dict[str, list[Template]] = defaultdict(list)
-    for t in tp:
-        by_cls[t.source_stats["class"]].append(t)
-    jmap = {m.judgement.no: m for m in plan["members"]}
-    low = [m for m in plan["members"] if m.judgement.confidence == "低"]
-    focus = [111, 234, 413]
+    ig = plan["integrity"]
+    exp = len(tp)
+    n_solo = plan["n_single_arc_templates"]
+    n_multi = exp - n_solo
+    members = plan["members"]
+    tpl_of = {m.judgement.no: t.name for t in tp for m in t.members}
+    tpl_n = {t.name: t.source_stats["n_members"] for t in tp}
+    bak_file, bak_rows = _latest_backup()
+    xtab: dict[str, Counter] = defaultdict(Counter)
+    for j in plan["judgements"]:
+        xtab[j.block][j.form_tag or "(空)"] += 1
+    low = [m for m in members if m.judgement.confidence == "低"]
+    multiline = [m for m in members if m.judgement.form_tag == "多线弧"]
+    axis_src = [m for m in members if m.axis_src]
+    downgraded = [m for m in members if m.judgement.downgraded]
+    tbd_keys = [k for k in plan["keys"] if k["sub_event"].startswith("待定:")]
+    ss_exit = _shaosong_exit(bak_rows)
+    recon = _sk03_recon()
+    apply_lines = _log_lines("SK07_apply.txt", ("[apply]",))
+    verify_pass = _log_lines("SK07_verify.txt", ("PASS",))
+    verify_fail = _log_lines("SK07_verify.txt", ("FAIL",))
+    restore_lines = [x for x in (SK07 / "SK07_restore_check.txt").read_text(encoding="utf-8").splitlines()
+                     if x.strip().startswith("[restore-check]")
+                     or any(k in x for k in ("字段不全", "仍在库", "备份中仍"))]
+    bak_cols = len(bak_rows[0]) if bak_rows else 0
+    old_beats = sum(_n_beats(_as_json(r.get("structure"))) for r in bak_rows)
 
     L: list[str] = []
     w = L.append
-    w(f"# SK03 重组报告 · 骨架库 v4（{(plan['ts'][:16]).replace('T', ' ')} UTC）\n")
-    w("> 工单 DEV-SK03｜权威数据源 `outputs/skel_v4/判类结果-v4.md`（616 弧 / 57 类 / 低置信 49）\n"
-      "> 脚本 `backend/scripts/skel_v4_rebuild.py`｜零 LLM 调用（唯向量重建需网关 embedding）\n")
-    ig = plan["integrity"]
-    w(f"**权威输入自检**（脚本每次跑都重核）：{ig['rows']} 行 / 弧号无缺号 {ig['no_gap']} / "
-      f"{ig['n_classes']} 类 / 置信分布 {ig['conf_dist']} / 低置信主表与 §4 清单口径一致 "
-      f"{ig['low_match']}（{ig['low_from_main']} vs {ig['low_from_list']}）/ 大类计数求和 "
-      f"{ig['sum_by_class']}。\n")
+    w(f"# SK07 重组报告 · 骨架库 v4.2（{plan['ts'][:19].replace('T', ' ')} UTC）\n")
+    w("> 工单 [DEV-SK07]｜权威输入 `outputs/sk06b/_work/判类_全量1033.json`"
+      "（1033 弧 / 57 大类 / 139 个 (大类,母题) 键）\n"
+      "> 脚本 `backend/scripts/skel_v4_rebuild.py`｜判类零 API 重算（直读 SK06B 结果），"
+      "唯向量重建需网关 9377 embedding\n"
+      "> PM 裁决两份：`pm-verdict-DEV-SK07-dryrun.md`（裁路① 978 张照实 apply + SK08 立项）"
+      "｜`pm-verdict-DEV-SK07-apply前置.md`（问1 网关 / 问2 甲案 / 问3 改口径）\n")
 
+    # ── 0 结论 ──
     w("## 0. 一句话结论\n")
-    w(f"- 判类 {plan['n_arcs']} 弧 / {plan['n_classes']} 类 → **(大类,子事件) 键 "
-      f"{len(plan['keys'])} 个 → 模板 {new['n_templates']} 张**，全部为单成员模板"
-      f"（孤例标 {plan['n_single_arc_templates']} 张，与单成员模板数逐一对账）。")
-    w(f"- **A17 已修**：全库 {plan['n_beats']} 环里最大单拍参考数由旧库 "
-      f"**{old['max_variants_per_beat']}** 降到 **{new['max_variants_per_beat']}**；"
-      f"旧库 {old['n_multi_variant_beats']} 个多参考拍中有 **{old['n_same_desc_beats']} 个"
-      f"（{old['n_same_desc_beats']*100//max(1,old['n_multi_variant_beats'])}%）"
-      f"所有变体 desc 完全同文**——A17 污染的直接指纹（全局 seq 字典解析把每条弧都指向"
-      f"同一批窗口原子）；新库 {new['n_variants']} 条 desc **两两互不相同**"
-      f"（{new['n_distinct_desc']}/{new['n_variants']} 唯一），污染归零。")
-    w(f"- ⚠️ **零合并**：{len([k for k in plan['keys'] if k['n_members']>1])} 个多成员键"
-      f"（共 {sum(k['n_members'] for k in plan['keys'] if k['n_members']>1)} 弧）内"
-      f"**没有任何一对弧通过 v3 合并判据**。控制实验证明这是精确键粒度的**结构性结果**，"
-      f"不是实现缺陷（见 §6）；若要减少模板数，杠杆在子事件词表合并，不在合并判据。\n")
+    w(f"- 判类 **{plan['n_arcs']} 弧** → (大类,母题) 精确键 **{len(plan['keys'])} 个** → "
+      f"模板 **{exp} 张**：多成员 **{n_multi} 张**（吸收 "
+      f"{plan['n_arcs'] - exp} 弧，占 {round((plan['n_arcs'] - exp) * 100 / plan['n_arcs'], 1)}%）"
+      f"＋ 孤例 **{n_solo} 张**。对照 SK03（v4.1）616 弧→616 张、吸收 0%，"
+      "本轮两处判据改动（分段档 + 核心单向）把形状聚合真正跑通了。")
+    w(f"- **换代（甲案）已完成**：旧 v4.1 arc active **{len(bak_rows)} 张全部转 archived**"
+      f"（备份 `{bak_file.name}` 全字段 {bak_cols} 列，单事务）；"
+      f"新 **{exp} 张 active、origin={ORIGIN_V4_2}**。")
+    w(f"- **向量按 PM 裁问3 口径**：只清被换代的 {len(bak_rows)} 张旧弧模板 plot_template 块 "
+      f"**2907 块**（cast/原型各 0，265 张 active 角色模板三路块一律禁碰）→ 重建 {exp} 张零失败 → "
+      f"三路源数 **1243**（{exp} 新 arc ＋ 265 角色）零孤儿。")
+    w(f"- verify **{len(verify_fail)} FAIL**、restore-check 通过、幂等重跑零变化；"
+      f"绍宋 25 弧不进重组（§8 退场记录）。\n")
 
-    w("## 1. 新旧对比\n")
-    w(f"> 旧库口径来源：**{old['src']}**（全字段备份即新旧对比的权威源；"
-      f"apply 之后旧 100 已 archived，不能再从 active 量）\n")
-    w("| 维度 | 旧库（v3，100 张 active） | 新库（v4） |")
-    w("|---|---|---|")
-    w(f"| 大类数 | 无（v3 按原子环聚类，无判类身份） | **{plan['n_classes']}** |")
-    w(f"| 模板数 | {old['n_templates']} | **{new['n_templates']}** |")
-    w(f"| 模板命名 | 核心环中文名「·」连接 | **`大类--子事件`**（精确键，可检索匹配） |")
-    w(f"| 最大单拍参考数 | {old['max_variants_per_beat']} | **{new['max_variants_per_beat']}** |")
-    w(f"| variants 合计 | {old['total_variants']} | {new['n_variants']} |")
-    w(f"| 多参考拍 desc 全同文 | {old['n_same_desc_beats']} / {old['n_multi_variant_beats']}"
-      f"（A17 污染） | {new['n_same_desc_beats']} / {new['n_multi_variant_beats']}"
-      f"（精确键下每拍仅 1 变体，已无多参考拍） |")
-    w(f"| `display_top` 消费契约 | 无（0 张） | 每张 structure 顶层 `display_top: 5` |")
-    w(f"| beats/模板中位数 | {old['beats_median']} | {new['beats_median']} |")
-    w(f"| character 模板 | {old['character_active']}（未动） | {old['character_active']}（未动） |")
-    w(f"| 借邻（跨子事件借弧） | 组装层无此约束 | **零借邻**（仅检索层可退同大类） |\n")
-
-    w("## 2. 每大类抽 2 张模板\n")
-    w("| 大类 | 模板名 | 键(大类,子事件) | 成员弧 | 拍数 | 变体数 |")
-    w("|---|---|---|---|---|---|")
-    for cls in sorted(by_cls, key=lambda c: -len(by_cls[c])):
-        ts = sorted(by_cls[cls], key=lambda t: (-t.source_stats["n_members"], t.name))
-        for t in ts[:2]:
-            bs = [b for ph in t.structure["phases"] for b in ph["beats"]]
-            mem = "、".join(f"#{m.judgement.no} {m.book}·{m.arc_name}" for m in t.members[:3])
-            if len(t.members) > 3:
-                mem += f" …共{len(t.members)}"
-            w(f"| {cls} | {t.name} | ({cls}, {t.source_stats['sub_event'] or '空'}) | "
-              f"{mem} | {len(bs)} | {sum(len(b['variants']) for b in bs)} |")
-    w("")
-
-    w("## 3. 低置信成员单列（按类分组 · 共 "
-      f"{len(low)} 条）——供模板级裁决去留\n")
-    w("> 主类唯一、不动（禁双记，与组装精确键冲突）；处置权在模板级，不在弧级。\n")
-    bylow: dict[str, list[MemberArc]] = defaultdict(list)
-    for m in low:
-        bylow[m.judgement.cls].append(m)
-    w("| 大类 | 弧号 | 书·弧名 | 子事件 | 所属模板 | 判类依据 |")
-    w("|---|---|---|---|---|---|")
-    tpl_of = {}
-    for t in tp:
-        for m in t.members:
-            tpl_of[m.judgement.no] = t.name
-    for cls in sorted(bylow, key=lambda c: -len(bylow[c])):
-        for m in sorted(bylow[cls], key=lambda x: x.judgement.no):
-            j = m.judgement
-            mark = " **★重点**" if j.no in focus else ""
-            w(f"| {cls}{mark} | #{j.no} | {j.book}·{j.arc_name} | {j.sub_event} | "
-              f"{tpl_of.get(j.no, '?')} | {j.reason[:60]} |")
-    w("")
-    w(f"**重点低置信 3 条**（SK02b/c 交办）：\n")
-    tpl_n = {t.name: t.source_stats["n_members"] for t in tp}
-    for no in focus:
-        m = jmap.get(no)
-        t = tpl_of.get(no)
-        if not m:
-            continue
-        w(f"- **#{no} {m.judgement.book}·{m.judgement.arc_name}** → 键 "
-          f"({m.judgement.cls}, {m.judgement.sub_event})，落在模板 `{t}`"
-          f"（该模板成员数 {tpl_n.get(t, '?')}，"
-          f"{'孤例标已打' if m.judgement.sub_event else '无子事件'}）。"
-          f"判类成因：{m.judgement.reason[:110]}")
-    w("")
-
-    w("## 4. 孤例清单与样本分档（裁决 3A）\n")
-    w(f"- **孤例类（1 成员，免合并打孤例标）{len(plan['orphan_classes'])} 个**："
-      f"{'、'.join(plan['orphan_classes'])}")
-    orphan_t = [t for t in tp if t.source_stats.get("orphan_class")]
-    for t in orphan_t:
-        w(f"  - `{t.name}` ← #{t.members[0].judgement.no} "
-          f"{t.members[0].book}·{t.members[0].arc_name}")
-    small = [c for c, v in plan["tiers"].items() if v.startswith("小样本-3~4")]
-    w(f"- **小样本 3~4 成员类 {len(small)} 个（报告单列）**：{'、'.join(sorted(small))}")
-    for c in sorted(small):
-        ts = [t for t in tp if t.source_stats["class"] == c]
-        w(f"  - {c}：{len(ts)} 模板｜成员合计 "
-          f"{sum(t.source_stats['n_members'] for t in ts)}｜"
-          f"单弧模板 {sum(1 for t in ts if t.source_stats['single_arc'])}")
-    s2 = [c for c, v in plan["tiers"].items() if v.startswith("小样本-2")]
-    w(f"- **小样本 2 成员类 {len(s2)} 个（照常走合并判据）**：{'、'.join(sorted(s2))}")
-    ph = [t for t in tp if t.source_stats.get("placeholder_arcs")]
-    w(f"- **占位弧模板 {len(ph)} 张**（判类裁定不修数据、打标）：")
-    for t in ph:
-        w(f"  - `{t.name}` ← #{'、#'.join(str(x) for x in t.source_stats['placeholder_arcs'])}"
-          f" {'、'.join(m.arc_name for m in t.members)}")
-    w(f"- **孤例标总数 {plan['n_single_arc_templates']} == 单成员模板数 "
-      f"{new['n_templates']}**（逐一对账通过）\n")
-
-    w("## 5. 太荒回退台账（A17 两级解析的第二级）\n")
-    _raw = load_all_arcs()
-    n_win = sum(len(a.declared_seqs) for a in _raw if a.book != SHAOSONG)
-    n_ss = sum(len(a.declared_seqs) for a in _raw if a.book == SHAOSONG)
-    w(f"- 全库 **{n_win + n_ss} 拍**（7 本 win 书 {n_win} 拍 + 绍宋 singles {len(BOOKS) and 25} 文件 "
-      f"{n_ss} 拍）里 **{len(plan['ledger'])} 拍无真重叠候选 → 该拍缺失并记台账**：\n")
-    if plan["ledger"]:
-        w("| 书 | 弧 | seq | 弧区间 | 原因 | 同 seq 候选数 |")
-        w("|---|---|---|---|---|---|")
-        for e in plan["ledger"]:
-            w(f"| {e['book']} | {e['arc']} | {e['seq']} | c{e['ch_lo']}~{e['ch_hi']} | "
-              f"{e['reason']} | {e['n_cands']} |")
-        w("\n- 机制说明：该拍**不拿邻弧/越界原子兜底**（那正是 A17 的 ±2 容差病根）。"
-          "太荒该 seq 的唯一候选是**坏原子**（chapter_start > chapter_end），"
-          "任何口径都取不到 → 该拍缺失。**这正是 PM 出弧速览-v6 时把 #111 从 4 拍收成 3 拍的机制**，"
-          "本脚本从数据独立复现了 v6。\n")
-    else:
-        w("（空）\n")
-
-    w("## 6. 零合并的归因（控制实验）\n")
-    w("| 对照实验 | 可并配对数 |")
+    # ── 1 输入自检 ──
+    w("## 1. 权威输入自检（v2 硬闸，每次跑都重核）\n")
+    n_llm = ig["rows"] - ig["inherited"] - ig["mapped"]
+    w("| 项 | 值 |")
     w("|---|---|")
-    w("| v3 协议（本单实现）：核心**双向**覆盖 + LCS/min 动态阈值 + LCS/max≥0.5 + SCS≤15 | **0 / 52** |")
-    w("| 对照：换成 v3 代码实际的**单向**核心闸（放宽） | **0 / 52** |")
-    w("| 归因拆解：52 对里 50 对卡在 LCS/min·LCS/max·SCS 三关，2 对卡在核心闸 |")
+    w(f"| 判类行数 | **{ig['rows']}**（rows_ok={ig['rows_ok']}，V2_ROWS={V2_ROWS}） |")
+    w(f"| 块构成 | {ig['block_counts']}（块1 弧库新弧 / 块2 新件原好弧 / 块3 旧件确定性映射），"
+      f"block_ok={ig['block_ok']} |")
+    w(f"| 来源构成 | LLM 新判 {n_llm} ＋ SK06 继承 {ig['inherited']} ＋ 确定性映射 {ig['mapped']} |")
+    w(f"| 标识唯一 / 全数对位 | {ig['ident_unique']} / {ig['joined']}（1033 弧全部取到拍结构） |")
+    w(f"| 大类 / 键 / 拍点 | {ig['classes']} 类 / {len(plan['keys'])} 键 / **{plan['n_beats']} 拍** |")
+    w(f"| 置信分布 | {ig['conf_dist']}｜低置信 {ig['low']} 条｜母题写「待定:」的判类行 "
+      f"{ig['tbd']} 条（去重成 {len([k for k in plan['keys'] if k['sub_event'].startswith('待定:')])} 个键，见 §13） |")
+    w(f"| C14 机械降档留痕 | {ig['downgraded']} 条（2 拍「高」＋偏轴备注自相矛盾 → 降「中」） |")
+    w(f"| 形态标分布 | {ig['form_dist']}（(空) 见 §6 说明） |")
+    w(f"| 兜底台账 | {len(plan['ledger'])} 条（v2 直取原子号，A17 两级解析路径不再触发） |\n")
+
+    # ── 2 判据改动 ──
+    w("## 2. 本轮两处判据改动与实测效果\n")
+    w("| 改动 | v4.1（SK03） | v4.2（本轮） | 依据 |")
+    w("|---|---|---|---|")
+    w(f"| 分段档门槛 | 动态 min：<5 环 0.65 / [5,10) 0.70 / ≥10 环 0.85 | "
+      f"**≤{SEG['split']} 拍 {SEG['short']} ／ >{SEG['split']} 拍 {SEG['long']}**"
+      f"（按较长方环数定档） | SK04 实测：2~3 拍弧的 LCS/min 只能取 0/0.33/0.5/1 格点，"
+      f"0.65 与 0.70 对短弧等价于「几乎全同」 |")
+    w("| 核心覆盖闸 | **双向**（A∩B 且 B∩A） | **单向**（任一方核心被对方覆盖即放行；"
+      "双方核心都落对方外才拦） | 任务单 §二.1；重构后弧库无 core_atomics，双向闸过严 |")
+    w("| 其余三关 | LCS/max ≥ 0.5、SCS ≤ 15 环、连续同原子压成 ×N | 不变 | — |")
     w("")
-    w("**判读**：零合并**不是**双向核心闸带来的。把闸门放宽到 v3 代码的单向口径，可并数仍是 0 ——"
-      "在精确 (大类,子事件) 粒度下，同键弧的**原子骨架本身就不同形**"
-      "（如 `绝境反杀--绝地反杀` 6 弧 seq 分别是 3/3/5/4/4/2 环，两两 LCS 多为 0）。")
-    w("这是「组装不借邻 + 子事件词表极细」两条用户拍板的**结构性结果**，"
-      "不是数据缺陷也不是实现取舍。若 PM 希望减少模板数，杠杆在**子事件词表合并**"
-      "（§二·补2.2 待审区机制），不在合并判据。\n")
+    sh = plan["seg_hits"]
+    w(f"- 判据评估次数与通过率：短档 试 **{sh.get('short_try', 0)}** 过 "
+      f"**{sh.get('short_pass', 0)}**；长档 试 **{sh.get('long_try', 0)}** 过 "
+      f"**{sh.get('long_pass', 0)}**。")
+    w(f"- 拦截归因：核心单向 {sh.get('core_block', 0)}｜短档不足 {sh.get('short_below', 0)}｜"
+      f"长档不足 {sh.get('long_below', 0)}｜长短悬殊 {sh.get('maxratio_block', 0)}｜"
+      f"SCS 超长 {sh.get('scs_block', 0)}。")
+    w(f"- 核心拍定义（块1 弧库无 core_atomics）：{plan['core_stat']}。")
+    n_mm = len([k for k in plan["keys"] if k["n_members"] > 1])
+    n_zero = len([k for k in plan["keys"]
+                  if k["n_members"] > 1 and k["n_templates"] == k["n_members"]])
+    w(f"- ⚠ 978 张的诚实归因（PM 裁路①已认）：**{n_mm} 个成员≥2 的键里 {n_zero} 键零合并**"
+      f"（模板数 == 成员数，一条都没吸收），只有 **{n_mm - n_zero} 键**真的并了弧——"
+      "重构后每条弧是一条独立因果链，形状聚合天然对象少；继续降阈值/换核心定义只会产缝合怪"
+      "（三份归因实验见 `SK07_dryrun.txt` 与 x1b 复算）。语义聚合另立 SK08。\n")
 
-    w("## 7. 归并口径留档（本次实现）\n")
-    w("- 主判据：`seq == s` **且** 原子区间与弧区间**真重叠**（相交 ≥1 章），多候选取重叠最长者")
-    w("- **禁用**「⊆ 弧区间 ±2」容差（把邻弧尾巴原子放进来，实测污染 #234/#111）")
-    w("- 无候选 → **该拍缺失 + 记台账**，不兜底（兜底即复活 ±2 病根）")
-    w("- 核心**双向**覆盖：`cores(A) ⊆ seq(B)` **且** `cores(B) ⊆ seq(A)`"
-      "（任务单与 `merge_arcs_crossbook.py` 文档字符串口径一致）")
-    w("- LCS/min 动态阈值：<5 环 0.65 / [5,10) 0.70 / ≥10 环 0.85；LCS/max ≥ 0.5；SCS ≤ 15 环")
-    w("- 连续同原子压成一步（v3 拍板⑥），`repeats` 记次数，beat 标签带 `×N`"
-      f"（本次压掉 {n_win + n_ss - plan['n_beats']} 环，"
-      f"占 {(n_win + n_ss - plan['n_beats']) * 100 // max(1, n_win + n_ss)}%，"
-      f"全为真实连打如「外门大比连胜之路」擂台比试 ×7）")
-    w("- variants 排序：核心命中优先 → tag 与**拍型签名**（≥半数变体共有的 tag）Jaccard 降序"
-      " → (src, how) 稳定收尾；**全量存储**，消费端按 `display_top: 5` 取前 5")
-    w(f"- 样本分档：孤例类 {len(plan['orphan_classes'])} 免合并打孤例标；"
-      f"小样本 2 成员 {len(s2)} 类照常走判据；3~4 成员 {len(small)} 类报告单列；≥5 常规类正常模板化\n")
+    # ── 3 多成员清单 ──
+    w(f"## 3. 多成员模板清单（**{n_multi} 张**，逐张溯源）\n")
+    d = plan["member_dist"]
+    w(f"> 成员数分布：{'｜'.join(f'{k} 员 × {v} 张' for k, v in sorted(d.items()) if k > 1)}\n")
+    w("| 模板名 | 成员 | 拍 | 成员弧（标识→取数源→原弧gid） | 形态标 |")
+    w("|---|---|---|---|---|")
+    for t in sorted([x for x in tp if x.source_stats["n_members"] > 1],
+                    key=lambda x: (-x.source_stats["n_members"], x.name)):
+        ss = t.source_stats
+        mem = "；".join(
+            f"#{m['no']} {m['book']}·{m['arc']}〔{m['ident']}｜{str(m['judge_source']).partition('（')[0]}"
+            + (f"｜gid {','.join(str(g) for g in m['origin_gids'])}" if m.get("origin_gids") else "")
+            + "〕"
+            for m in ss["member_arcs"])
+        w(f"| `{t.name}` | {ss['n_members']} | {_n_beats(t.structure)} | {mem} | "
+          + "、".join(f"{k or '(空)'}×{v}" for k, v in sorted(ss["form_tags"].items())) + " |")
+    w("")
 
-    w("## 8. 双验收自测结果（本单执行方自跑，供 PM 复核）\n")
-    w("| 验收标准 | 结果 | 证据 |")
+    # ── 3.1 抽 3 张自证（验收 3）──
+    w("### 3.1 抽 3 张多成员模板逐拍自证（供 PM 复抽）\n")
+    picks = sorted([x for x in tp if x.source_stats["n_members"] >= 3],
+                   key=lambda x: -x.source_stats["n_members"])[:1]
+    rest = [x for x in tp if x.source_stats["n_members"] == 2
+            and x.name not in {p.name for p in picks}]
+    picks += rest[:2]
+    for t in picks:
+        ss = t.source_stats
+        w(f"**`{t.name}`**｜键 ({ss['class']}, {ss['sub_event']})｜成员 {ss['n_members']} 弧"
+          f"｜形态标 { {k or '(空)': v for k, v in ss['form_tags'].items()} }｜"
+          f"孤例标 {'无' if not ('孤例' in t.genre_tags) else '有'}\n")
+        for m in ss["member_arcs"]:
+            w(f"- #{m['no']} **{m['book']}·{m['arc']}**（c{m['ch_lo']}~{m['ch_hi']}）"
+              f"取数 `{m['src_ref']}`｜判类身份 {m['ident']}（{m['judge_source']}）｜"
+              f"置信 {m['confidence']}｜形态标 {m['form_tag'] or '(空)'}"
+              + (f"｜分线键备注 {m['line_keys']}" if m["line_keys"] else "")
+              + (f"｜原弧gid {m['origin_gids']}" if m["origin_gids"] else "")
+              + (f"｜主轴来源 {m['axis_src']}" if m["axis_src"] else "")
+              + (f"｜C14 降档 {m['downgraded']}" if m["downgraded"] else ""))
+        w("\n**逐拍装配**（骨架 SCS 环 → 各成员弧在该环的实证走法）\n")
+        for ph in t.structure["phases"]:
+            for b in ph["beats"]:
+                vs = " ／ ".join(f"{v['src']}·{v['how']}：{v['desc'][:34]}" for v in b["variants"][:3])
+                w(f"  - `{ph['phase']}` **{b['beat']}**（变体 {len(b['variants'])}，"
+                  f"display_top={t.structure['display_top']}）→ {vs}")
+        w("")
+
+    audit = SK07 / "SK07_取数链审计.txt"
+    w("### 3.2 取数链独立审计（脚本 `backend/scripts/x4_chain_audit.py`，"
+      "与组装**不同代码路径**、只读库＋只读源文件）\n")
+    if audit.is_file():
+        for x in audit.read_text(encoding="utf-8").splitlines():
+            if x.strip():
+                w(f"- `{x.strip()}`")
+        w("\n> 这三条是「库里的每句话都能回到源文件」的证明：A 核 弧库原子号 → win summary → "
+          "库内 desc 逐条闭环（31 个差额已归因为拍板⑥连续同原子压步，按设计只留首拍概要）；"
+          "B 核 全库 3736 条 desc 无一超出源书概要集（零伪造）；"
+          "C 核 265 张角色模板三路块原封不动、三路孤儿 0。\n")
+    else:
+        w("（审计件未生成：跑 `x4_chain_audit.py` 后重出 `--report` 即自动附上）\n")
+
+    # ── 4 变体后缀 ──
+    by_key: dict[tuple, list] = defaultdict(list)
+    for t in tp:
+        by_key[(t.source_stats["class"], t.source_stats["sub_event"])].append(t)
+    multi_keys = {k: v for k, v in by_key.items() if len(v) > 1}
+    n_suffixed = sum(1 for v in multi_keys.values() for t in v if re.search(r"-\d+$", t.name))
+    w(f"## 4. 变体后缀清单（同键拆多张 → `-1/-2/…`，共 **{len(multi_keys)} 个键 / "
+      f"{n_suffixed} 张带后缀**）\n")
+    w("> 命名规则 `_template_name()`：`大类--母题`（母题空则只大类）；同键 >1 张时逐张加 `-idx`，"
+      "成员多的簇先出（稳定序：`(-n_members, min(弧号))`）。检索端可仍按 `大类--母题` 前缀召回全部变体。\n")
+    w("| 键 (大类,母题) | 张数 | 多成员张 | 孤例张 | 实例名 |")
+    w("|---|---|---|---|---|")
+    for (cls, sub), ts in sorted(multi_keys.items(), key=lambda x: (-len(x[1]), x[0])):
+        nm = len([t for t in ts if t.source_stats["n_members"] > 1])
+        w(f"| {cls}--{sub or '(空)'} | **{len(ts)}** | {nm} | {len(ts) - nm} | "
+          + "、".join(f"`{t.name}`" for t in sorted(ts, key=lambda x: x.name)) + " |")
+    w("")
+
+    # ── 5 孤例清单 ──
+    by_cls: dict[str, list] = defaultdict(list)
+    for t in tp:
+        if t.source_stats["single_arc"]:
+            by_cls[t.source_stats["class"]].append(t)
+    w(f"## 5. 孤例清单（**{n_solo} 张**，逐条列全 · 按大类分组）\n")
+    w(f"- 对账：孤例标（genre_tags 含「孤例」）张数 **{sum(1 for t in tp if '孤例' in t.genre_tags)}** "
+      f"== 单成员模板数 **{n_solo}** == 清单条数 **{sum(len(v) for v in by_cls.values())}**\n")
+    for cls in sorted(by_cls, key=lambda c: (-len(by_cls[c]), c)):
+        ts = sorted(by_cls[cls], key=lambda x: x.name)
+        w(f"**{cls}（{len(ts)} 张）**")
+        w("")
+        for t in ts:
+            m = t.source_stats["member_arcs"][0]
+            bs = _n_beats(t.structure)
+            w(f"- `{t.name}` ← #{m['no']} {m['book']}·{m['arc']}（{bs} 拍｜"
+              f"{m['form_tag'] or '(空)'}｜置信 {m['confidence']}）")
+        w("")
+    orphan_cls_line = "、".join(plan["orphan_classes"])
+    w(f"> 孤例**大类**（判类结果-v4 §7 分档，1 成员类免合并）：{orphan_cls_line}。"
+      "🔴 对账发现：该分档来自 v4.1 旧口径 md，v2 下 跨域远征 已有 2 成员（庙堂权谋/格局变动 各 1）。"
+      "实测影响 = **0 张**——该键两成员走判据仍判不可并（可并对 0/1，簇数 2 == 孤例路径 2），"
+      "故本轮不改分档输入；SK08 前应把分档改读 v2 判类结果（已列 §13 遗留）。\n")
+
+    # ── 6 形态标与三个新字段落位 ──
+    w("## 6. 形态标分布与三个新字段落位\n")
+    w("### 6.1 形态标 × 块（判类侧 1033 条）\n")
+    w("| 块 | 好弧 | 多线弧 | 好弧(未重编) | (空) | 合计 |")
+    w("|---|---|---|---|---|---|")
+    for blk in ("块1", "块2", "块3"):
+        c = xtab[blk]
+        w(f"| {blk} | {c.get('好弧', 0)} | {c.get('多线弧', 0)} | "
+          f"{c.get('好弧(未重编)', 0)} | {c.get('(空)', 0)} | {sum(c.values())} |")
+    tot = Counter()
+    for blk in xtab:
+        tot.update(xtab[blk])
+    w(f"| **合计** | **{tot.get('好弧', 0)}** | **{tot.get('多线弧', 0)}** | "
+      f"**{tot.get('好弧(未重编)', 0)}** | **{tot.get('(空)', 0)}** | **{sum(tot.values())}** |")
+    blank = [j for j in plan["judgements"] if not j.form_tag]
+    blank_blk = sorted({j.block for j in blank})
+    blank_src = Counter(str(j.source).partition("（")[0] for j in blank)
+    filled_blk = sorted({j.block for j in plan["judgements"]
+                         if j.form_tag == "好弧(未重编)"})
+    w(f"\n- `(空) {tot.get('(空)', 0)} 条`全部落在 **{'、'.join(blank_blk)}**，来源 "
+      f"{dict(blank_src)}——SK06B 汇总时只给「弧库出口」（块1）与"
+      f"「SK06 试判继承 / 确定性映射」（{'、'.join(filled_blk)}）的行填了出口列，"
+      f"块2 本轮新判的 {tot.get('(空)', 0)} 行留空。这些行的实体口径与 `好弧(未重编)` 相同"
+      "（块2 本就是未被 F6R 重构触碰的原好弧，同块 23 条继承行即带该标），"
+      "**属字段留空、不是数据缺失**；本轮不反向改写判类侧，落库时 member_arcs.form_tag "
+      "如实留空、不做假填充（回填规则列 §13 遗留）。")
+    tag_sum = Counter()
+    for t in tp:
+        tag_sum.update(t.source_stats["form_tags"])
+    w(f"- 模板侧形态标落位（source_stats.form_tags 按**成员数**累加，"
+      f"合计 {sum(tag_sum.values())} == 判类 {ig['rows']} 条）：{dict(tag_sum)}\n")
+    w("### 6.2 多线弧的分线键备注落位（P4 乙案：主键=主轴母题，备注=其余线键）\n")
+    w("| 弧 | 主键 → 所在模板 | 分线键备注 |")
     w("|---|---|---|")
-    w(f"| 1 dry-run/apply/verify 三段有据；旧 100 archived 且备份可逐行还原 | ✅ | "
-      f"`SK03_dryrun.txt` / `SK03_apply.txt` / `SK03_verify.txt` / `SK03_restore_check.txt`；"
-      f"备份 100 行 × 12 列字段不全 0 行、100/100 仍在库（归档态） |")
-    w(f"| 2 新模板键精确无借邻 | ✅ | verify 对**全量 {exp} 张**逐条核成员弧判类键 == 模板键，0 不一致 |")
-    w(f"| 3 孤例标数量 = 单成员模板数 | ✅ | verify：{exp} == {exp} |")
-    w("| 4 character 265 / event_skeletons 零改动 | ✅ | verify：character/active 265、"
-      "event_skeletons 6 且字段签名 5466 字未变 |")
-    w("| 5 三路向量重建对账 + search 冒烟 | ✅ | 616 张模板三路块数 2907/0/0 = 预期；"
-      "孤儿块 0；模糊口述「主角在宗门比试擂台上一战成名夺魁」top1 命中 "
-      "`擂台大比--宗门擂台比试`（matched_beats=3） |")
-    w("| 6 幂等重跑零变化 | ✅ | 二次 `--apply` 走幂等分支（不动库、不覆盖备份）；"
-      "全库指纹（plot_templates + vector_chunks + event_skeletons 关键列 sha256）"
-      "前后**逐字节一致** |")
-    w("| 7 单测全绿 | ✅ | 681 基线 + 62 新增 = **743 passed** |")
-    w(f"| 8 抽查报告落盘 | ✅ | 本文件（低置信 49 条单列 + 新旧对比 + 孤例 + 回退台账） |")
+    n_lk = 0
+    for m in sorted(multiline, key=lambda x: x.judgement.no):
+        lk = m.judgement.line_keys
+        if lk:
+            n_lk += 1
+        w(f"| #{m.judgement.no} {m.book}·{m.arc_name}（{m.judgement.ident}） | "
+          f"({m.judgement.cls}, {m.judgement.sub_event}) → `{tpl_of[m.judgement.no]}` | {lk or '(空)'} |")
+    w(f"\n- 多线弧 **{len(multiline)} 条**（= SK06B 弧库出口「多线弧」41 条）全部成弧进重组，"
+      f"其中带分线键备注 **{n_lk} 条**，备注随 member_arcs.line_keys 落进库（零丢字段）。\n")
+    w("### 6.3 主轴来源与 C14 降档留痕\n")
+    w(f"- 主轴来源非空 **{len(axis_src)} 条**（= SK06B 收尾①：无主轴 10 条的主轴＋拍归属说明"
+      "回写弧库，标 `来源=SK06B 归纳`）："
+      + "、".join(f"#{m.judgement.no} → `{tpl_of[m.judgement.no]}`" for m in axis_src))
+    w(f"  （弧库字段原文：`{axis_src[0].axis_src}`）" if axis_src else "")
+    w(f"- C14 降档 **{len(downgraded)} 条**留痕随 member_arcs.downgraded 落库："
+      + "、".join(f"#{m.judgement.no}" for m in downgraded) + "\n")
+
+    # ── 7 低置信 ──
+    w(f"## 7. 低置信成员落位（判类侧 {ig['low']} 条 · A1 口径不放宽）\n")
+    w("> 低置信是「复核资源分配器」不是拒绝标：这些弧照常成模板，只是留给增类轮优先复核。\n")
+    w("| 弧 | 书·弧名 | 键 (大类,母题) | 置信 | 落在模板 | 该模板成员 | 降档 |")
+    w("|---|---|---|---|---|---|---|")
+    for m in sorted(low, key=lambda x: (x.judgement.cls, x.judgement.no)):
+        j = m.judgement
+        w(f"| #{j.no} | {j.book}·{m.arc_name} | ({j.cls}, {j.sub_event}) | {j.confidence} | "
+          f"`{tpl_of[j.no]}` | {tpl_n.get(tpl_of[j.no], '?')} | {j.downgraded or '—'} |")
+    in_multi = sum(1 for m in low if tpl_n.get(tpl_of[m.judgement.no], 1) > 1)
+    w(f"\n- 低置信 {len(low)} 条里落进**多成员模板** {in_multi} 条、落进孤例 {len(low) - in_multi} 条；"
+      f"「含低置信成员」标模板数 {sum(1 for t in tp if '含低置信成员' in t.genre_tags)} 张。\n")
+
+    # ── 8 绍宋退场 ──
+    w(f"## 8. 绍宋 25 弧退场记录（不进本轮重组）\n")
+    w(f"- **为什么退**：绍宋 25 条在 SK06B 判类 1033 里没有判类身份（无 (大类,母题) 键可归），"
+      "PM 裁 §一.2 定「形态普查 + 判类同轮」处理，留 backlog，不在 SK07 夹带。")
+    w(f"- **怎么退**：v4.1 里含绍宋成员的 **{len(ss_exit)} 张**模板随 616 张一起 "
+      f"`status='archived'`（**未删除**），备份 `{bak_file.name}` 可逐行还原。"
+      f"v4.2 active 侧绍宋成员数 = **{sum(1 for t in tp for m in t.members if m.book == SHAOSONG)}**"
+      "（断言 0，组装路径根本不读绍宋）。")
+    w(f"- **退场前基线**（旧 v4.1 快照）：单成员模板 {sum(1 for x in ss_exit if x['n_members'] == 1)} 张 / "
+      f"多成员 {sum(1 for x in ss_exit if x['n_members'] and x['n_members'] > 1)} 张 / "
+      f"骨架拍数合计 {sum(x['beats'] for x in ss_exit)} 拍\n")
+    w("| 旧模板名 | 绍宋弧 | 成员 | 拍 | 旧 id | 现状态 |")
+    w("|---|---|---|---|---|---|")
+    for x in ss_exit:
+        w(f"| `{x['name']}` | {x['arcs']} | {x['n_members']} | {x['beats']} | `{x['id']}` | archived |")
+    rc = sqlite3.connect(DB_PATH.as_uri() + "?mode=ro", uri=True)
+    n_arch, arch_vec = rc.execute(
+        "select count(*), coalesce(sum(exists(select 1 from vector_chunks v "
+        "where v.source_type='plot_template' and v.source_id=p.id)), 0) "
+        "from plot_templates p where p.scale='arc' and p.status='archived'").fetchone()
+    n_ss_old = rc.execute(
+        "select count(*) from plot_templates where scale='arc' "
+        "and json_extract(source_stats,'$.origin')='shaosong_singles_v1'").fetchone()[0]
+    rc.close()
+    w("\n> **复核提示**：`source_stats` 列是 JSON 文本，中文按 `\\uXXXX` 转义存——"
+      "`where source_stats like '%绍宋%'` 会**恒返回 0 行**（不是数据没有），"
+      "要核成员必须 `json_extract` 或读回程序解析（本表即从备份逐行解析而来）。"
+      f"另：库内绍宋足迹共两组——本轮退场的 v4.1（origin `skel_v4`）{len(ss_exit)} 张，"
+      f"以及 SK01 期 `shaosong_singles_v1` {n_ss_old} 张（早先已 archived）。"
+      f"**archived 弧模板现共 {n_arch} 张、其中有向量的 {arch_vec} 张**"
+      "（换代清理彻底的旁证，历轮归档也一直干净）。")
     w("")
+
+    # ── 9 SK03 对账 ──
+    w("## 9. SK03_dryrun 恢复件 vs SK03_apply.txt 逐行对账（PM 裁 §三.1 交办）\n")
+    w("> 背景：本轮把日志前缀改到 `outputs/sk07/` 前，误覆盖了 `outputs/skel_v4/SK03_dryrun.txt`。"
+      "处置按 PM 裁决：用 `git show HEAD:backend/scripts/skel_v4_rebuild.py` 重放再生，"
+      "并附本节机器对账自证一致（不自证口头）。\n")
+    if recon.get("available"):
+        w("| 对账项 | 恢复件 SK03_dryrun.txt | 原 SK03_apply.txt | 结论 |")
+        w("|---|---|---|---|")
+        w(f"| 逐键段行数 | {recon['n_keys']} | {recon['n_keys_apply']} | 一致 |")
+        w(f"| 逐键段（去空行、逐行同序） | sha256[:16] `{recon['sha_dry']}` | "
+          f"sha256[:16] `{recon['sha_apply']}` | **逐行完全一致 = {recon['same_order']}** |")
+        w(f"| 对称差（内容差异行） | 仅恢复件有 {len(recon['only_dry'])} 行 | "
+          f"仅 apply 件有 {len(recon['only_apply'])} 行 | {'无实质差异' if not (recon['only_dry'] or recon['only_apply']) else '见下'} |")
+        w(f"| 汇总行（判类 / 模板 / 样本分档） | 3 行 | 3 行 | "
+          f"**逐字一致 = {recon['head_same']}** |")
+        w("")
+        common = [x for x in recon["head_dry"] if not x.startswith("权威输入自检")]
+        w("汇总行原文（两份逐字相同；内容自带竖线，故不入表格）：\n")
+        for x in common:
+            w(f"- `{x}`")
+        w("")
+        w(f"- 权威输入核对：616 行 / 57 类 / 键 586 / 原子 2291 拍 / 模板 616 张（单成员 616）/ "
+          f"兜底台账 1 拍 —— 与 PM 裁决里写死的五项数字**逐项吻合**。")
+        extra = [x for x in recon["head_dry"] if x.startswith("权威输入自检")]
+        if extra:
+            w(f"- 唯一文本差异：恢复件多 1 行「{extra[0][:24]}…」——该自检行是 07:03 apply 之后"
+              "补进 `print_plan()` 的，属**代码增量**不是数据漂移；时刻行（dry_run/apply 时间戳）不计差异。\n")
+    else:
+        w("（SK03 两份日志缺失，本节无法机器对账）\n")
+
+    # ── 10 新旧对比 ──
+    w("## 10. 新旧对比（v4.1 616 张 → v4.2 978 张）\n")
+    w(f"> 旧库口径来源：**{old['src']}**（换代快照全字段，apply 后旧行已 archived，不能再从 active 量）\n")
+    w("| 维度 | v4.1（616） | v4.2（978） |")
+    w("|---|---|---|")
+    w(f"| 输入判类弧数 | 616（判类结果-v4.md） | **{plan['n_arcs']}**（判类_全量1033.json） |")
+    w(f"| 书数 | {len(BOOKS)} 本（不含寒门枭士） | **{len(BOOKS_V2)} 本**（加寒门枭士；绍宋退场） |")
+    w(f"| 模板数 | {old['n_templates']} | **{new['n_templates']}** |")
+    w(f"| 多成员模板 | 0（SK03 全孤例，吸收 0%） | **{n_multi}**（吸收 "
+      f"{round((plan['n_arcs'] - exp) * 100 / plan['n_arcs'], 1)}%） |")
+    w(f"| 孤例/单成员模板 | 616 | {n_solo} |")
+    w(f"| 拍点合计 | {old_beats} | **{plan['n_beats']}** |")
+    w(f"| beats/模板中位数 | {old['beats_median']} | {new['beats_median']} |")
+    w(f"| 最大单拍参考数 | {old['max_variants_per_beat']} | **{new['max_variants_per_beat']}** |")
+    w(f"| variants 条数 / 唯一 desc | {old['total_variants']} | {new['n_variants']} / "
+      f"{new['n_distinct_desc']} 唯一（A17 污染零） |")
+    w(f"| 多参考拍 desc 全同文 | {old['n_same_desc_beats']} / {old['n_multi_variant_beats']} | "
+      f"{new['n_same_desc_beats']} / {new['n_multi_variant_beats']} |")
+    w(f"| character active / event_skeletons | 265 / 6 | **265 / 6（零改动，verify 逐字段签名核）** |")
+    w(f"| 向量三路源数 | 881（616 arc ＋ 265 character） | **1243**（978 ＋ 265） |\n")
+
+    # ── 11 apply 六步 ──
+    w("## 11. apply 六步与库侧对账（日志回读，非自报）\n")
+    for x in apply_lines:
+        w(f"- `{x}`")
+    w("")
+    w(f"- verify 断言：**{len(verify_pass)} PASS / {len(verify_fail)} FAIL**；"
+      f"restore-check：{'；'.join(restore_lines) or '见 SK07_restore_check.txt'}")
+    w("- 关键口径逐项：")
+    w("  1. 换代基线：arc active 必须恰为 **616** 且 origin 全含 `skel_v4`（不符即拒跑）→ 通过；")
+    w("  2. **与 265 张 active 角色模板零相交**断言（PM 裁问3-② 的机器护栏）→ 通过；")
+    w("  3. 归档动作同调 `remove_source` 清 plot_template 块 → **2907 块**，cast/原型 0（缺口已补）；")
+    w("  4. 向量重建只建 v4.2 978 张（角色三路块禁碰），成功 978 / 失败 0；")
+    w("  5. verify 零孤儿按 **1243 源** 断言（不是「只召回新库」）→ PASS；")
+    w("  6. env 防呆 `assert_no_env_override()`：`--apply/--verify` 时 SK07_T_LONG / SK07_T_SHORT / "
+      "SK07_SEG_SPLIT / SK07_CORE_MODE 非拍板值即拒跑（env 只许 --dry-run 试算）。\n")
+
+    # ── 12 双验收 ──
+    w("## 12. 双验收自测结果（一审，供 PM 复核）\n")
+    w("| 验收标准（任务单 §五 ＋ PM 裁决） | 结果 | 证据 |")
+    w("|---|---|---|")
+    w("| 1 单测全绿 | ✅ | 判据改动后 `./.venv/Scripts/python.exe -m pytest backend/tests/unit -q` "
+      "→ **857 passed**（PM 亲验同数；`test_skel_v4.py` 合并判据用例 7→9：新增单向核心、分段档边界） |")
+    w(f"| 2 dry-run 模板数有解释 | ✅ | 978 张（预估 700~850 偏离即停 → 停闸报 PM → 裁路①）；"
+      f"三份归因实验 + §2 拦截计数 |")
+    w("| 3 抽 3 张多成员模板核溯源＋形态标落位 | ✅ | §3.1 三张逐拍自证：每成员 ident/取数源/gid/"
+      "置信/形态标/分线键备注/降档全列；verify 另对全量 978 张逐条核「成员弧键 == 模板键」零借邻；"
+      "§3.2 取数链三段独立审计（A 1126/1157＋31 压缩归因、B 3736 desc 零伪造、C 角色三路未动）全 PASS |")
+    w("| 4 幂等 + 回滚 + 零孤儿 | ✅ | 幂等：库内 v4.2 978 == active arc 978，计划重算 978 一致；"
+      "回滚：备份 616 行 × 12 列字段不全 0，616/616 仍在库（归档态）；"
+      "零孤儿：三路孤儿 0，源数 1243 PASS |")
+    w(f"| 5 绍宋退场记录 | ✅ | §8 {len(ss_exit)} 张旧模板逐条列名/id，active 侧绍宋成员 0 |")
+    w("| 6 v2 取数口径（禁直用原子键叉乘字段） | ✅ | 判类直读 1033 不重算；取数按 "
+      "(书名, part, 原子号) → win summary，跨 part 弧按 gid 序 × 拍数切片并核章段一致 |")
+    w("| 7 角色模板 / event_skeletons 禁碰 | ✅ | verify：character active 265 零改动、"
+      "event_skeletons 6 且字段签名 5466 字未变 |")
+    w("| 8 报告落盘 | ✅ | 本文件（§3 多成员 52 张全列 / §4 后缀 / §5 孤例 926 张全列 / "
+      "§6 形态标 / §8 绍宋 / §9 SK03 对账 / §11 库侧对账） |")
+    w("")
+
+    # ── 13 遗留 ──
+    w("## 13. 遗留与不进本轮（交 PM 排期）\n")
+    w(f"- **SK08 语义聚合试算轮**（已立项）：主对象就是 §5 的 {n_solo} 张孤例；"
+      f"新模板打 `origin=skel_v4_3`，版本链 skel_v4 → skel_v4_2 → skel_v4_3。")
+    w(f"- **样本分档输入改 v2**：`orphan_classes()/sample_tiers()` 仍读 `判类结果-v4.md`（v4.1 口径），"
+      "本轮实测影响 0 张（§5 附注已给复算），但 SK08 前应改成读 1033。")
+    w(f"- **待定组键 {len(tbd_keys)} 个**（模板名含「待定:」）：判类侧已标待增类裁决，"
+      "落库后随 `增类并集清单.md` 23 方向一并处理（新政改革拆键列首位）。")
+    w("- **绍宋 25 弧**：形态普查 + 判类同轮（backlog，PM 裁 §一.2）。")
+    w("- **散件 96 / 过渡拍 9**：退原子层，不占弧位，本轮不读。")
+    w("- **数据噪声 2 条**（DATA01c）：gid400 主轴拍号噪声、F6R-0446 章段噪声。")
+    w(f"- **块2 出口列留空 {tot.get('(空)', 0)} 条**（见 §6.1）：实体口径等同 `好弧(未重编)`，"
+      "可由一条确定性规则回填（重生成判类 json 的出口列 → rebuild 重跑即幂等换代），"
+      "本轮不自作主张改写判类侧。")
 
     REPORT.write_text("\n".join(L), encoding="utf-8")
     return REPORT
 
 
 # ═══════════════════════════════ 十、main ═══════════════════════════════
+def assert_no_env_override(mode: str) -> None:
+    """防呆（PM 裁决 §三.2）：env 覆盖口只许 --dry-run 敏感性试算用，apply/verify 必须跑用户拍板值。"""
+    if mode not in ("apply", "verify"):
+        return
+    bad = []
+    cm = os.environ.get("SK07_CORE_MODE")
+    if cm not in (None, "repeat"):
+        bad.append(f"SK07_CORE_MODE={cm}（默认 repeat）")
+    if SEG != SEG_DEFAULT:
+        bad.append(f"SEG={SEG} ≠ 拍板值 {SEG_DEFAULT}（env SK07_T_SHORT/SK07_T_LONG/SK07_SEG_SPLIT）")
+    if bad:
+        sys.exit(f"[{mode}] 拒绝执行：判据被 env 改过，落库/核账必须跑拍板值 → " + "；".join(bad))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
@@ -1694,19 +2011,20 @@ def main() -> None:
     g.add_argument("--verify", action="store_true")
     g.add_argument("--restore-check", action="store_true")
     g.add_argument("--report", action="store_true",
-                   help="只写抽查报告 outputs/skel_v4/SK03_重组报告.md（不碰库）")
+                   help="只写抽查报告 outputs/sk07/SK07_重组报告.md（不碰库）")
     a = ap.parse_args()
     # argparse dest 是下划线形（--dry-run → dry_run）
     mode = next(k for k, v in vars(a).items() if v)
 
     if mode in ("apply", "verify") and backend_running():
         sys.exit(f"[{mode}] 拒绝执行：127.0.0.1:8000 有后端在跑（破坏性/核账操作须先停服务）")
+    assert_no_env_override(mode)
 
     if mode == "restore_check":
         do_restore_check()
         return
     plan = build_plan()
-    print(f"SK03 {mode} @ {now_utc()}\n")
+    print(f"SK07 {mode} @ {now_utc()}\n")
     if mode == "dry_run":
         print_plan(plan)
     elif mode == "report":

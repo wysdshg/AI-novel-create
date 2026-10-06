@@ -571,7 +571,7 @@ class TestTemplateBuild:
                                  VOCAB, {})[0]
         assert t.structure["skeleton"]["seq"] == ["甲", "乙"]
         assert t.structure["skeleton"]["repeats"] == [1, 1]
-        assert t.structure["skeleton"]["origin"] == "skel_v4"
+        assert t.structure["skeleton"]["origin"] == skel.ORIGIN_V4_2
 
     def test_source_stats_fields(self):
         a = self._m("甲乙", ["甲"], book="书甲", arc_name="弧A", no=7, conf="低")
@@ -579,7 +579,7 @@ class TestTemplateBuild:
         t = skel.build_templates({("大战征伐", "家族战争"): [a, b]},
                                  VOCAB, {})[0]
         ss = t.source_stats
-        assert ss["origin"] == "skel_v4"
+        assert ss["origin"] == skel.ORIGIN_V4_2
         assert ss["books"] == 2 and ss["book_names"] == ["书乙", "书甲"]
         assert ss["n_members"] == 2
         assert ss["class"] == "大战征伐" and ss["sub_event"] == "家族战争"
