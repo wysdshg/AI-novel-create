@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-06T15:19:44.925Z",
+  "updatedAt": "2026-10-06T15:35:39.737Z",
   "modules": {
     "0": {
       "id": "0",
@@ -867,10 +867,10 @@
           "type": "process",
           "name": "SK07 rebuild v4.2",
           "state": "in_progress",
-          "description": "🔵 dry-run 偏离停闸已裁（pm-verdict-DEV-SK07-dryrun.md）：**裁路① 978 张照实 --apply**（三条归因实证：降阈值/换核心拍三档全无效；83 大键零合并=弧层重构后每条弧是独立因果链，吸收 5.3% 已是 SK03 零合并的量级提升；硬凑重蹈覆辙；apply 可回滚）+ **路②立项 SK08 语义聚合试算轮**（主线后）。PM 亲验：857 绿/x1b 复算一致/dry-run 复现 978。两件自报处置：SK03_dryrun.txt 恢复接受+重组报告附对账节；env 覆盖口保留+apply 防呆 assert。**待用户确认网关 9377 流式+backend 停 8000 后 apply 六步**→重组报告→PM 验收关账。",
+          "description": "🔵 apply 前置三问已裁（pm-verdict-DEV-SK07-apply前置.md）：问1 网关用户起（9377）；问2 裁甲（origin=skel_v4_2 版本标识+归档 616，乙丢回滚锚点否决）；**问3 关键拦截——PM 查库实锤执行方定性错误**（265=character active 角色模板非归档；arc archived 264 零向量无残留），「清非本轮向量」若跑会误删角色模板三路向量=选角检索断；正确口径=只清被换代 616 的 plot_template 块（retire 路径补调 remove_source）+265 角色三路禁碰+verify 零孤儿按 1243 源（978+265）断言。执行方修订脚本口径→回执列修订点→用户起网关→apply 六步→重组报告→PM 终验。",
           "doc": ".flow/docs/f6-resume.md",
           "createdAt": "2026-10-05T00:00:00.000Z",
-          "updatedAt": "2026-10-06T15:19:44.925Z",
+          "updatedAt": "2026-10-06T15:35:39.737Z",
           "location": ""
         },
         "SK05B": {
