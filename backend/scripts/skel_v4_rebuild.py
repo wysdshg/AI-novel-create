@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import socket
 import sqlite3
@@ -48,13 +49,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend" / "scripts"))
 sys.path.insert(0, str(ROOT / "backend"))
 
-from merge_arcs_crossbook import align_positions, lcs_len, min_threshold_for, scs_merge  # noqa: E402
+from merge_arcs_crossbook import align_positions, lcs_len, scs_merge  # noqa: E402
 
 RAW = ROOT / "outputs" / "_atomic_raw"
 SKEL = ROOT / "outputs" / "skel_v4"
 JUDGE_MD = SKEL / "判类结果-v4.md"
 BACKUP_DIR = ROOT / "outputs" / "_backup"
-REPORT = SKEL / "SK03_重组报告.md"
+SK07 = ROOT / "outputs" / "sk07"
+REPORT = SK07 / "SK07_重组报告.md"   # v4.2：SK07 产物独立目录，不覆写 SK03 历史日志
 DB_PATH = Path(r"C:\Users\w3013\.ai_novel\data\novel_agent.db")
 
 # win 素材按书名固定列出（不含 _2step / v1-noretry / *.state.json 等中间产物）
@@ -66,11 +68,17 @@ ORIGIN_V3 = "atomic_merge_v1"
 ORIGIN_V4 = "skel_v4"
 DISPLAY_TOP = 5
 PHASES = ("起", "承", "转", "合")
-T_SHORT = 0.65          # 动态 min 短弧段（拍板②）
-T_MID = 0.70
-T_LONG = 0.85
+# 分段档门槛（v4.2 用户拍板，取代 SK03 的动态 0.65/0.70/0.85）：
+# 分段依据沿用 min_threshold_for 的「较长方环数」惯例，只是档数从三段变两段。
+SEG = {"split": int(os.environ.get("SK07_SEG_SPLIT", 3)),
+       "short": float(os.environ.get("SK07_T_SHORT", 0.50)),
+       "long": float(os.environ.get("SK07_T_LONG", 0.75))}   # 三个阈值可用 env 覆盖，仅供 dry-run 敏感性试算
 THR_MAX = 0.5           # LCS/max 门槛（拦长短悬殊）
 MAX_LEN = 15            # SCS 合并链长上限
+
+# dry-run 统计口径：分段档评估计数（判据被贪心反复调用，计的是「评估次数」不是「弧对数」）
+SEG_HITS: dict[str, int] = {}
+CORE_STAT: dict[str, int] = {}
 BASELINE = {"character_active": 265, "event_skeletons": 6, "arc_active_v3": 100}
 
 
@@ -121,6 +129,12 @@ class RawArc:
     dropped_seqs: list[int] = field(default_factory=list)
     ledger: list[dict] = field(default_factory=list)
     src_ref: str = ""           # 素材文件（win_<书>.json / 绍宋#N.txt），供追溯
+    # ── v4.2 新增溯源（块1 弧库新弧专用；旧路径留空） ──
+    form_tag: str = ""          # 形态标：好弧 / 多线弧
+    line_keys: str = ""         # 分线键备注（多线弧各内部线母题倾向，自由文本）
+    axis_src: str = ""          # 主轴来源（SK06B 归纳回写者带标注）
+    origin_gids: list[int] = field(default_factory=list)   # 弧库 来源.原弧gid（溯源链）
+    atom_part: str = ""         # 取数用 part（base/p2），与 原子号 一起构成放行口径
 
 
 def overlaps(a_lo: int, a_hi: int, b_lo: int, b_hi: int) -> bool:
@@ -253,6 +267,15 @@ class Judgement:
     confidence: str
     reason: str
     sub_tags: list[str]
+    # ── v4.2 输入侧（判类 1033 直读）新增溯源字段，旧 md 路径留空 ──
+    ident: str = ""             # 判类条目标识（F6R-xxxx / gidNNN）
+    block: str = ""             # 块1 / 块2 / 块3
+    form_tag: str = ""          # 形态标（好弧/多线弧/好弧(未重编)）
+    line_keys: str = ""         # 分线键备注
+    downgraded: str = ""        # C14 降档留痕
+    source: str = ""            # LLM 判类 / SK06 试判继承 / 确定性映射
+    low_reason: str = ""        # 低置信原因
+    gap_note: str = ""          # 词表缺口明细
 
 
 CONF = ("高", "中", "低")
@@ -352,6 +375,8 @@ class MemberArc:
     beats: list[Beat]
     judgement: Judgement
     src_ref: str = ""
+    origin_gids: list[int] = field(default_factory=list)   # 块1 弧库 来源.原弧gid 溯源链
+    axis_src: str = ""                                     # 块1 主轴来源（SK06B 归纳回写标注）
 
     @property
     def key(self) -> tuple[str, str]:
@@ -393,6 +418,233 @@ def join_judgements(arcs: list[RawArc], rows: list[Judgement]) -> list[MemberArc
     return out
 
 
+# ═══════════════ 三B、v4.2 输入层：判类 1033 直读 ＋ 弧库/win 双源取数 ═══════════════
+JUDGE_V2 = ROOT / "outputs" / "sk06b" / "_work" / "判类_全量1033.json"
+ARC_LIB = ROOT / "outputs" / "f6r" / "弧库_F6R.json"
+F6Q_GID = ROOT / "outputs" / "f6q" / "_work" / "合并分类.json"
+V2_ROWS, V2_B1, V2_B2, V2_B3 = 1033, 400, 313, 320
+# 块1 核心拍定义（弧库无 core_atomics）：repeat=重拍主环（默认）｜first2=前2环｜empty=不设核心闸
+# 三档只为 dry-run 对比模板数，实跑取哪一档由 PM 裁。
+CORE_MODE = os.environ.get("SK07_CORE_MODE", "repeat")
+# v2 书集：判类 1033 覆盖的 8 书（寒门枭士在 SK03 旧路径里不参与，v2 必含；绍宋 25 弧不进重组）
+BOOKS_V2 = BOOKS + ("寒门枭士",)
+CORE_TOPK = 2                   # 块1 新弧主环取「重复度最高的前 K 个 atomic_id」
+
+
+def _span(s: str) -> tuple[int, int]:
+    m = re.search(r"c?(\d+)\s*~\s*(\d+)", str(s or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def pick_cores(seq: list[str], reps: list[int], topk: int = CORE_TOPK) -> list[str]:
+    """块1 新弧的核心拍（弧库无 core_atomics，v4.2 用重拍定义主环）。
+
+    取「序列内重复度最高的前 topk 个 atomic_id」，并列按首次出现顺序；
+    无任何重拍时退化为该弧全部环（等价于不施加核心闸，交给 LCS 与长短悬殊闸）。
+    ⚠ 这是 v4.2 的新判据输入，dry-run 报告须单列它的占比，PM 可据此复核。
+    """
+    if not seq:
+        return []
+    weight = defaultdict(int)
+    first = {}
+    for i, x in enumerate(seq):
+        weight[x] += reps[i] if i < len(reps) else 1
+        first.setdefault(x, i)
+    if CORE_MODE == "empty":        # 变体：不设核心闸（纯靠 LCS 与长短悬殊）
+        CORE_STAT["mode=empty"] = CORE_STAT.get("mode=empty", 0) + 1
+        return []
+    if CORE_MODE == "first2":       # 变体：无重拍也取前 topk 环
+        CORE_STAT["mode=first2"] = CORE_STAT.get("mode=first2", 0) + 1
+        return list(dict.fromkeys(seq))[:topk]
+    ranked = sorted(weight, key=lambda x: (-weight[x], first[x]))
+    if weight[ranked[0]] <= 1:
+        CORE_STAT["退化为全序列（无重拍）"] = CORE_STAT.get("退化为全序列（无重拍）", 0) + 1
+        return list(dict.fromkeys(seq))
+    CORE_STAT["重拍主环（前 %d 个）" % topk] = CORE_STAT.get("重拍主环（前 %d 个）" % topk, 0) + 1
+    return ranked[:topk]
+
+
+_ATOM_CACHE: dict[tuple[str, str], list[dict]] = {}
+
+
+def win_atoms(book: str, part: str) -> list[dict]:
+    """win_<书>.json / win_<书>.p2.json 的 atoms 数组。
+
+    🔴 放行口径：弧库消费一律 `原子号 → atoms[原子号−1]`（1-based 全局下标），
+    **禁用弧库 `原子键` 字段**（那是 原弧gid×原子号 叉乘，直用会重复喂同一拍）。
+    """
+    key = (book, part)
+    if key not in _ATOM_CACHE:
+        fn = RAW / (f"win_{book}.json" if part == "base" else f"win_{book}.p2.json")
+        if not fn.is_file():
+            raise FileNotFoundError(f"v2 取数缺文件：{fn}")
+        _ATOM_CACHE[key] = json.loads(fn.read_text(encoding="utf-8")).get("atoms") or []
+    return _ATOM_CACHE[key]
+
+
+def arc_atoms_v2(a: dict, gpart: dict[int, str]) -> list[tuple[int, str, dict]]:
+    """一条块1 弧 → [(原子号, part, atom 记录)]。
+
+    单 part 弧：part 由 原弧gid 唯一决定，原子号直取。
+    跨 part 弧（实测全库仅 2 条，SK06B t02/t06 已验）：按 原弧gid 顺序与该旧弧
+    n_beats 逐段切分原子号；弧库 原子号 与 原弧gid 均按章段升序，故顺序即归属。
+    """
+    book = a["来源"]["书名"]
+    gids = list(a["来源"]["原弧gid"])
+    parts = {gpart[g] for g in gids}
+    if len(parts) == 1:
+        part = parts.pop()
+        arr = win_atoms(book, part)
+        return [(n, part, arr[n - 1]) for n in a["原子号"]]
+    out, idx = [], 0
+    for g in gids:
+        nb = int(GID_ROW[g]["n_beats"])
+        part = gpart[g]
+        arr = win_atoms(book, part)
+        seg = a["原子号"][idx: idx + nb]
+        if len(seg) != nb:
+            raise ValueError(f"{a['弧号']} 跨 part 切分越界（gid{g} 需 {nb} 拍，仅剩 {len(seg)}）")
+        out += [(n, part, arr[n - 1]) for n in seg]
+        idx += nb
+    if idx != len(a["原子号"]):
+        raise ValueError(f"{a['弧号']} 跨 part 切分后原子号未分配完（{idx}/{len(a['原子号'])}）")
+    return out
+
+
+def load_arcs_lib_v2() -> dict[str, RawArc]:
+    """块1：弧库_F6R 出口∈(好弧,多线弧) 的 400 条重构后新弧 → RawArc（键=弧号）。"""
+    lib = json.loads(ARC_LIB.read_text(encoding="utf-8"))
+    gpart = {e["gid"]: e["part"] for e in json.loads(F6Q_GID.read_text(encoding="utf-8"))}
+    out: dict[str, RawArc] = {}
+    for a in lib["弧"]:
+        if a["出口"] not in ("好弧", "多线弧"):
+            continue
+        book = a["来源"]["书名"]
+        part_label = "/".join(sorted({gpart[g] for g in a["来源"]["原弧gid"] if g in gpart}))
+        steps: list[Beat] = []
+        for no, part, x in arc_atoms_v2(a, gpart):
+            summary_txt = str(x.get("summary") or "").strip()
+            if not summary_txt:
+                raise ValueError(f"拍概要空 {book}/{part}/#{no}（E18）")
+            steps.append(Beat(seq=no, atomic_id=str(x.get("atomic_id") or ""),
+                              ch_lo=int(x.get("chapter_start") or 0),
+                              ch_hi=int(x.get("chapter_end") or 0),
+                              summary=summary_txt, tags=list(x.get("tags") or [])))
+        if len(steps) != a["拍数"]:
+            raise ValueError(f"{a['弧号']} 拍数不符：导出 {len(steps)} vs 弧库 {a['拍数']}")
+        seq, reps, beats = _compress(steps)
+        lo, hi = _span(a.get("章段"))
+        out[a["弧号"]] = RawArc(book=book, arc_name=a["弧名"], ch_lo=lo, ch_hi=hi, seq=seq,
+                                repeats=reps, beats=beats, cores=pick_cores(seq, reps),
+                                declared_seqs=[x.seq for x in steps], src_ref=f"win_{book}.json",
+                                form_tag=a["出口"], line_keys="",
+                                axis_src=str(a.get("主轴来源") or ""),
+                                origin_gids=list(a["来源"]["原弧gid"]), atom_part=part_label)
+    return out
+
+
+def load_arcs_win_v2() -> dict[int, RawArc]:
+    """块2/块3：未被重构触碰的原弧，直接读 win（**含 .p2**，旧 load_all_arcs 不含）。
+
+    对位法：同一 (书名, part) 内 F6Q gid 升序 == 该 win 文件 arcs 数组顺序
+    ——SK06B 实测 1028/1028 逐位全等（弧名＋起讫章双字段），故按序 zip 并逐条核弧名，
+    不用 (书,弧名,章段) 做 join 键（F6Q 章段是「章段包含」解析结果，与 win 声明章段不同源）。
+    """
+    out: dict[int, RawArc] = {}
+    for b in BOOKS_V2:
+        for part in ("base", "p2"):
+            fn = RAW / (f"win_{b}.json" if part == "base" else f"win_{b}.p2.json")
+            if not fn.is_file():
+                continue
+            ras = parse_win_data(json.loads(fn.read_text(encoding="utf-8")))
+            gids = sorted(g for g, e in GID_ROW.items() if e["book"] == b and e["part"] == part)
+            if len(gids) != len(ras):
+                raise ValueError(f"{b}/{part} 量不符：F6Q {len(gids)} 弧 vs win arcs {len(ras)} 弧")
+            for g, ra in zip(gids, ras):
+                if ra.arc_name != GID_ROW[g]["arc_name"]:
+                    raise ValueError(f"gid{g} 弧名对位不符：win {ra.arc_name!r} vs F6Q {GID_ROW[g]['arc_name']!r}")
+                ra.src_ref = fn.name
+                ra.form_tag = "好弧(未重编)"
+                out[g] = ra
+    return out
+
+
+def load_judgements_v2(path: Path = JUDGE_V2) -> list[Judgement]:
+    """判类 1033 直读：每弧自带 (大类,母题)，rebuild 不重算判类。"""
+    rows = json.loads(path.read_text(encoding="utf-8"))["rows"]
+    out: list[Judgement] = []
+    for i, r in enumerate(rows, 1):
+        cls, _, sub = str(r["母题"]).partition("--")
+        out.append(Judgement(no=i, book=r["书"], arc_name=r["弧名"], cls=cls, sub_event=sub,
+                             confidence=r["置信"], reason=str(r.get("依据") or ""),
+                             sub_tags=[], ident=r["标识"], block=r["块"],
+                             form_tag=str(r.get("出口") or ""),
+                             line_keys=str(r.get("分线键备注") or ""),
+                             downgraded=str(r.get("降档") or ""),
+                             source=str(r.get("来源") or ""),
+                             low_reason=str(r.get("低置信原因") or ""),
+                             gap_note=str(r.get("词表缺口明细") or "")))
+    return out
+
+
+def join_v2(rows: list[Judgement], lib_arcs: dict[str, RawArc],
+            win_arcs: dict[tuple, RawArc]) -> list[MemberArc]:
+    """v2 对位：标识 → 弧结构（块1 走弧库、块2/3 走 win），逐条核书名/弧名/拍数。"""
+    out: list[MemberArc] = []
+    for j in rows:
+        if j.ident.startswith("F6R-"):
+            a = lib_arcs.get(j.ident)
+            if a is None:
+                raise ValueError(f"{j.ident} 在弧库（好弧/多线弧）里找不到")
+        else:
+            a = win_arcs.get(int(j.ident[3:]))
+            if a is None:
+                raise ValueError(f"{j.ident}（{j.book} {j.arc_name}）在 win 原弧索引里找不到")
+        if a.book != j.book or a.arc_name != j.arc_name:
+            raise ValueError(f"{j.ident} 对位不符：素材 {a.book}/{a.arc_name} vs 判类 {j.book}/{j.arc_name}")
+        if len(a.seq) and not a.beats:
+            raise ValueError(f"{j.ident} 有序列无拍概要")
+        out.append(MemberArc(book=a.book, arc_name=a.arc_name, ch_lo=a.ch_lo, ch_hi=a.ch_hi,
+                             seq=a.seq, repeats=a.repeats, cores=a.cores, beats=a.beats,
+                             judgement=j, src_ref=a.src_ref,
+                             origin_gids=list(getattr(a, "origin_gids", []) or []),
+                             axis_src=str(getattr(a, "axis_src", "") or "")))
+    return out
+
+
+def integrity_v2(rows: list[Judgement], members: list[MemberArc]) -> dict:
+    """v2 权威输入硬闸（任一项不过即拒绝组装）。"""
+    bc = Counter(j.block for j in rows)
+    keys = {(j.cls, j.sub_event) for j in rows}
+    return {
+        "rows": len(rows), "block_counts": dict(bc),
+        "rows_ok": len(rows) == V2_ROWS,
+        "block_ok": (bc.get("块1", 0), bc.get("块2", 0), bc.get("块3", 0)) == (V2_B1, V2_B2, V2_B3),
+        "ident_unique": len({j.ident for j in rows}) == len(rows),
+        "joined": len(members) == len(rows),
+        "keys": len(keys), "classes": len({j.cls for j in rows}),
+        "conf_dist": dict(Counter(j.confidence for j in rows)),
+        "low": sum(1 for j in rows if j.confidence == "低"),
+        "tbd": sum(1 for j in rows if j.sub_event.startswith("待定:")),
+        "form_dist": dict(Counter(j.form_tag for j in rows)),
+        "multi_line": sum(1 for j in rows if j.form_tag == "多线弧"),
+        "inherited": sum(1 for j in rows if "继承" in j.source),
+        "mapped": sum(1 for j in rows if "确定性" in j.source),
+        "downgraded": sum(1 for j in rows if j.downgraded),
+        "shaosong_excluded": 25,
+        "beats": sum(len(m.beats) for m in members),
+    }
+
+
+GID_ROW: dict[int, dict] = {}
+
+
+def ensure_gid_index() -> None:
+    global GID_ROW
+    if not GID_ROW:
+        GID_ROW = {e["gid"]: e for e in json.loads(F6Q_GID.read_text(encoding="utf-8"))}
+
+
 def group_by_key(members: list[MemberArc]) -> dict[tuple[str, str], list[MemberArc]]:
     """键 = (大类, 子事件)；子事件为空归 (大类, "")。**绝不跨键借弧。**"""
     g: dict[tuple[str, str], list[MemberArc]] = defaultdict(list)
@@ -414,12 +666,24 @@ class Cluster:
         return len(self.members)
 
 
-def can_merge_arcs(a: Cluster, b: Cluster, t_short: float = T_SHORT,
-                   thr_max: float = THR_MAX, max_len: int = MAX_LEN) -> tuple[bool, float, str]:
-    """键内归并判据（v3 协议 + 核心**双向**覆盖）。
+def seg_threshold(la: int, lb: int) -> float:
+    """分段档门槛：较长方 ≤3 环 → 0.50，>3 环 → 0.75。
 
-    ① 双向核心覆盖（硬门槛）：cores(A) ⊆ seq(B) **且** cores(B) ⊆ seq(A)
-    ② LCS/min(lenA,lenB) ≥ 动态 min（<5 环 0.65 / [5,10) 0.70 / ≥10 环 0.85）
+    分段依据与 SK03 的 min_threshold_for 同构（看较长方环数），只是合并强度换成的确需
+    放宽：重构后弧集里 2 拍短弧占块1 的 56%，而 SK04 实测 2~3 拍弧的 LCS/min 只能取
+    {0, 0.33, 0.5, 1} 格点，0.65/0.70 两档对短弧实际等价于「几乎全同」。
+    """
+    return SEG["short"] if max(la, lb) <= SEG["split"] else SEG["long"]
+
+
+def can_merge_arcs(a: Cluster, b: Cluster, thr_max: float = THR_MAX,
+                   max_len: int = MAX_LEN,
+                   thr_min: float | None = None) -> tuple[bool, float, str]:
+    """键内归并判据（v4.2：核心**单向**覆盖 ＋ **分段档** min）。
+
+    ① 单向核心覆盖（硬门槛）：cores(A) ⊆ seq(B) **或** cores(B) ⊆ seq(A) 即可
+       —— 双向要求会让「一方是另一方超集」的正常扩弧合不拢（SK04 实测短弧主因）
+    ② LCS/min(lenA,lenB) ≥ 分段档：≤3 拍 0.50，>3 拍 0.75（thr_min 可显式覆盖，供格点测试）
     ③ LCS/max ≥ thr_max(0.5) —— 拦长短悬殊
     ④ SCS 合并链长 ≤ max_len(15)
     返回 (ok, score, why)；score = LCS/min（合并强度）。
@@ -427,21 +691,29 @@ def can_merge_arcs(a: Cluster, b: Cluster, t_short: float = T_SHORT,
     sa, sb = set(a.seq), set(b.seq)
     miss_a = [c for c in a.cores if c not in sb]
     miss_b = [c for c in b.cores if c not in sa]
-    if miss_a or miss_b:
-        return False, 0.0, f"核心双向覆盖不成立: A缺{miss_a} B缺{miss_b}"
+    if miss_a and miss_b:
+        SEG_HITS["core_block"] = SEG_HITS.get("core_block", 0) + 1
+        return False, 0.0, f"核心单向覆盖不成立: A缺{miss_a} B缺{miss_b}"
     if not a.seq or not b.seq:
         return False, 0.0, "空序列"
     la, lb = len(a.seq), len(b.seq)
+    tier = "short" if max(la, lb) <= SEG["split"] else "long"
+    key = tier + "_try"
+    SEG_HITS[key] = SEG_HITS.get(key, 0) + 1
     l = lcs_len(a.seq, b.seq)
     r_min, r_max = l / min(la, lb), l / max(la, lb)
     merged, _ = scs_merge(a.seq, a.repeats, b.seq, b.repeats)
     if len(merged) > max_len:
+        SEG_HITS["scs_block"] = SEG_HITS.get("scs_block", 0) + 1
         return False, r_min, f"SCS {len(merged)} > {max_len} 环 → 另起单弧模板"
-    t_eff = min_threshold_for(la, lb, t_short)
+    t_eff = seg_threshold(la, lb) if thr_min is None else thr_min
     if r_min < t_eff:
-        return False, r_min, f"包含度 min {r_min:.2f} < 动态门槛 {t_eff:.2f}"
+        SEG_HITS[tier + "_below"] = SEG_HITS.get(tier + "_below", 0) + 1
+        return False, r_min, f"包含度 min {r_min:.2f} < 分段门槛 {t_eff:.2f}"
     if r_max < thr_max:
+        SEG_HITS["maxratio_block"] = SEG_HITS.get("maxratio_block", 0) + 1
         return False, r_max, f"包含度 max {r_max:.2f} < {thr_max}（长短悬殊）"
+    SEG_HITS[tier + "_pass"] = SEG_HITS.get(tier + "_pass", 0) + 1
     return True, r_min, ""
 
 
@@ -449,14 +721,15 @@ def _as_cluster(m: MemberArc) -> Cluster:
     return Cluster(members=[m], seq=list(m.seq), repeats=list(m.repeats), cores=list(m.cores))
 
 
-def cluster_within_key(members: list[MemberArc], t_short: float = T_SHORT) -> list[Cluster]:
+def cluster_within_key(members: list[MemberArc],
+                       thr_min: float | None = None) -> list[Cluster]:
     """键内贪心多轮归并：每轮取分数最高的一对可并簇合并；合不拢的弧各留单弧簇。"""
     clusters = [_as_cluster(m) for m in members]
     while True:
         best = None
         for i in range(len(clusters)):
             for j in range(i + 1, len(clusters)):
-                ok, score, _ = can_merge_arcs(clusters[i], clusters[j], t_short)
+                ok, score, _ = can_merge_arcs(clusters[i], clusters[j], thr_min=thr_min)
                 if ok and (best is None or score > best[0]):
                     best = (score, i, j)
         if best is None:
@@ -596,8 +869,15 @@ def build_template(cls: str, sub: str, name: str, cluster: Cluster, vocab: dict[
         "low_conf_members": low, "single_arc": cluster.n == 1,
         # 成员溯源（弧号 + 书 + 弧名 + 章节区间）：让「无借邻」可被机器逐条核账
         "member_arcs": [{"no": m.judgement.no, "book": m.book, "arc": m.arc_name,
-                         "ch_lo": m.ch_lo, "ch_hi": m.ch_hi, "src_ref": m.src_ref}
+                         "ch_lo": m.ch_lo, "ch_hi": m.ch_hi, "src_ref": m.src_ref,
+                         # v4.2 溯源：判类身份来源 ＋ 弧库新弧的原弧gid 链 ＋ 三个新字段落位
+                         "ident": m.judgement.ident, "block": m.judgement.block,
+                         "form_tag": m.judgement.form_tag, "confidence": m.judgement.confidence,
+                         "line_keys": m.judgement.line_keys, "downgraded": m.judgement.downgraded,
+                         "judge_source": m.judgement.source, "origin_gids": m.origin_gids,
+                         "axis_src": m.axis_src}
                         for m in sorted(cluster.members, key=lambda x: x.judgement.no)],
+        "form_tags": dict(Counter(m.judgement.form_tag for m in cluster.members)),
     }
     if cls in orphan_cls:
         stats["orphan_class"] = True
@@ -634,10 +914,18 @@ def build_templates(groups: dict[tuple[str, str], list[MemberArc]], vocab: dict[
 
 # ═══════════════════════════════ 六、计划 ═══════════════════════════════
 def build_plan() -> dict:
-    """只读构建执行计划：逐键成员数/簇数/模板数/孤例数 + 兜底台账 + 低置信单列。"""
-    rows = parse_judgements()
-    arcs = load_all_arcs()
-    members = join_judgements(arcs, rows)
+    """只读构建执行计划（v4.2）：判类 1033 直读 ＋ 弧库(块1)/win(块2/3) 双源取数。
+
+    不进本轮重组：散件 96（退原子层）、过渡拍 9（不占弧）、绍宋 25（无判类身份，模板 archived 可回滚）。
+    """
+    SEG_HITS.clear()
+    CORE_STAT.clear()
+    ensure_gid_index()
+    rows = load_judgements_v2()
+    lib_arcs = load_arcs_lib_v2()
+    win_arcs = load_arcs_win_v2()
+    members = join_v2(rows, lib_arcs, win_arcs)
+    arcs = lib_arcs.values()          # 兜底台账仅 A17 旧口径才有，v2 直取原子号
     vocab = load_vocab()
     groups = group_by_key(members)
     orphan_cls = orphan_classes()
@@ -663,11 +951,12 @@ def build_plan() -> dict:
 
     ledger = [e for a in arcs for e in a.ledger]
     dup = [n for n, c in Counter(t.name for t in templates).items() if c > 1]
-    integrity = check_input_integrity(rows)
-    # 权威输入的硬断言：616 行 / 无缺号 / 低置信两处口径一致 / 类计数求和 = 行数
-    if not (integrity["rows"] == 616 and integrity["no_gap"] and integrity["low_match"]
-            and integrity["sum_by_class"] == integrity["rows"]):
-        sys.exit(f"[plan] 权威输入自检失败，拒绝组装: {integrity}")
+    integrity = integrity_v2(rows, members)
+    # v2 权威输入硬闸：1033 行 / 块 400·313·320 / 标识唯一 / 全数对位成功
+    if not (integrity["rows_ok"] and integrity["block_ok"] and integrity["ident_unique"]
+            and integrity["joined"]):
+        sys.exit(f"[plan] v2 权威输入自检失败，拒绝组装: {integrity}")
+    dist = Counter(len(t.members) for t in templates)
     return {
         "ts": now_utc(), "judgements": rows, "members": members, "groups": groups,
         "templates": templates, "keys": keys, "ledger": ledger, "tiers": tiers,
@@ -676,25 +965,57 @@ def build_plan() -> dict:
         "dup_template_names": dup,
         "class_counts": Counter(m.judgement.cls for m in members),
         "n_arcs": len(members), "n_classes": len({m.judgement.cls for m in members}),
-        "n_low_conf": sum(1 for m in members if m.judgement.confidence == "低"),
-        "n_beats": sum(len(a.seq) for a in arcs),
+        "n_low_conf": integrity["low"],
+        "n_beats": integrity["beats"],
         "n_single_arc_templates": sum(1 for t in templates if t.source_stats["single_arc"]),
         "n_small_sample_classes": sum(1 for v in tiers.values()
                                       if v.startswith("小样本-3~4")),
+        "member_dist": dict(dist),
+        "seg_hits": dict(SEG_HITS),
+        "core_stat": dict(CORE_STAT),
     }
 
 
 def print_plan(plan: dict) -> None:
     tp = plan["templates"]
-    print(f"[计划] {plan['ts']}")
     ig = plan["integrity"]
-    print(f"  权威输入自检：{ig['rows']} 行 / 无缺号 {ig['no_gap']} / {ig['n_classes']} 类 / "
-          f"置信分布 {ig['conf_dist']} / 低置信两处口径一致 {ig['low_match']}"
-          f"（主表 {ig['low_from_main']} · §4 清单 {ig['low_from_list']}）")
-    print(f"  判类 {plan['n_arcs']} 弧 / {plan['n_classes']} 类 / 低置信 {plan['n_low_conf']}"
-          f" | 原子 {plan['n_beats']} 拍 | 键 {len(plan['keys'])} 个")
+    print(f"[计划 v4.2] {plan['ts']}")
+    print(f"  v2 权威输入自检：{ig['rows']} 行 rows_ok={ig['rows_ok']}｜块 {ig['block_counts']} block_ok={ig['block_ok']}"
+          f"｜标识唯一 {ig['ident_unique']}｜全数对位 {ig['joined']}")
+    n_llm = ig["rows"] - ig["inherited"] - ig["mapped"]
+    print(f"  判类 {plan['n_arcs']} 弧 / {ig['classes']} 类 / 键 {len(plan['keys'])} 个"
+          f"｜置信 {ig['conf_dist']}｜低置信 {ig['low']}｜落待定组 {ig['tbd']}")
+    print(f"  来源构成：LLM 新判 {n_llm}＋SK06 继承 {ig['inherited']}＋确定性映射 {ig['mapped']}"
+          f"｜C14 降档留痕 {ig['downgraded']}")
+    print(f"  形态分布 {ig['form_dist']}｜多线弧 {ig['multi_line']}｜绍宋退场 {ig['shaosong_excluded']} 弧（不进重组）")
+    print(f"  拍点 {plan['n_beats']} 拍（v2 直取原子号，A17 兜底台账 {len(plan['ledger'])} 条）")
     print(f"  模板 {len(tp)} 张（单成员/孤例 {plan['n_single_arc_templates']} 张）"
-          f" | 兜底台账 {len(plan['ledger'])} 拍")
+          f"｜多成员 {len(tp) - plan['n_single_arc_templates']} 张")
+    d = plan["member_dist"]
+
+    def bucket(n):
+        return "1" if n == 1 else ("2" if n == 2 else ("3" if n == 3 else ("4~5" if n <= 5 else "6+")))
+
+    bk: dict[str, list[int]] = {}
+    for n, c in sorted(d.items()):
+        bk.setdefault(bucket(n), [0, 0])
+        bk[bucket(n)][0] += c
+        bk[bucket(n)][1] += n * c
+    print("  多成员分布（模板张数｜覆盖成员数）："
+          + "｜".join(f"{k}:{v[0]}张/{v[1]}员" for k, v in sorted(bk.items(), key=lambda x: ["1", "2", "3", "4~5", "6+"].index(x[0]))))
+    sh = plan["seg_hits"]
+
+    def rate(t, p):
+        return f"{(p / t * 100):.1f}%" if t else "—"
+
+    print(f"  分段档评估（判据被贪心多次调用，计评估次数）："
+          f"短档(≤{SEG['split']}拍) 试 {sh.get('short_try', 0)} 过 {sh.get('short_pass', 0)}"
+          f"（{rate(sh.get('short_try', 0), sh.get('short_pass', 0))}）｜"
+          f"长档(>{SEG['split']}拍) 试 {sh.get('long_try', 0)} 过 {sh.get('long_pass', 0)}"
+          f"（{rate(sh.get('long_try', 0), sh.get('long_pass', 0))}）")
+    print(f"  拦截归因：核心单向 {sh.get('core_block', 0)}｜短档不足 {sh.get('short_below', 0)}｜"
+          f"长档不足 {sh.get('long_below', 0)}｜长短悬殊 {sh.get('maxratio_block', 0)}｜SCS 超长 {sh.get('scs_block', 0)}")
+    print(f"  块1 核心拍来源（弧库无 core_atomics，v4.2 用重拍定义）：{plan['core_stat']}")
     print(f"  样本分档：孤例类 {len(plan['orphan_classes'])} "
           f"({', '.join(plan['orphan_classes'])})｜小样本3~4 类 {plan['n_small_sample_classes']}")
     print("\n-- 逐键（成员数 / 簇数 / 模板数 / 单弧数 / 样本层 / 低置信）--")
@@ -1402,13 +1723,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    LOG_NAME = {"--dry-run": "SK03_dryrun.txt", "--apply": "SK03_apply.txt",
-                "--verify": "SK03_verify.txt", "--restore-check": "SK03_restore_check.txt",
-                "--report": "SK03_report.txt"}
+    LOG_NAME = {"--dry-run": "SK07_dryrun.txt", "--apply": "SK07_apply.txt",
+                "--verify": "SK07_verify.txt", "--restore-check": "SK07_restore_check.txt",
+                "--report": "SK07_report.txt"}
     flag = next((k for k in LOG_NAME if k in sys.argv), None)
     if flag is None:
         raise SystemExit("用法: --dry-run | --apply | --verify | --restore-check | --report")
-    sys.stdout = _Tee(SKEL / LOG_NAME[flag])
+    SK07.mkdir(parents=True, exist_ok=True)
+    sys.stdout = _Tee(SK07 / LOG_NAME[flag])
     try:
         main()
     finally:

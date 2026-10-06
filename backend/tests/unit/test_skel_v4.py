@@ -355,33 +355,51 @@ class TestMergeCriteria:
         ok, score, why = skel.can_merge_arcs(A, B)
         assert ok and abs(score - 0.75) < 1e-9
 
-    def test_core_coverage_is_bidirectional(self):
-        """A 核心全在 B 里但 B 核心不在 A 里 → 不并（单向覆盖不够）。"""
+    def test_core_coverage_is_unidirectional(self):
+        """v4.2 单向覆盖：A 核心全在 B 里即可并，即便 B 的另一个核心不在 A 里。
+        （旧双向判据会把这种「一方是另一方超集/姊妹弧」的正常情况卡死。）"""
         A = self._m("甲乙丙丁", ["甲"], arc_name="A")
-        B = self._m("甲乙丙戊", ["戊"], arc_name="B")
-        ok, _, why = skel.can_merge_arcs(A, B)
-        assert not ok and "核心" in why
+        B = self._m("甲乙丙戊", ["甲", "戊"], arc_name="B")
+        ok, score, why = skel.can_merge_arcs(A, B)
+        assert ok and abs(score - 0.75) < 1e-9 and why == ""
 
     def test_both_directions_missing_a_core_blocks_merge(self):
+        """单向的下限：两边各有核心落在对方序列之外 → 仍不并。"""
         A = self._m("甲乙丙", ["甲"], arc_name="A")
         B = self._m("乙丙丁", ["丁"], arc_name="B")
-        assert skel.can_merge_arcs(A, B)[0] is False
+        ok, _, why = skel.can_merge_arcs(A, B)
+        assert ok is False and "单向" in why
 
-    def test_dynamic_min_thresholds(self):
-        """<5 环 0.65 / [5,10) 0.70 / ≥10 环 0.85（拍板② + 长组段）。"""
-        assert skel.min_threshold_for(3, 4, 0.65) == 0.65
-        assert skel.min_threshold_for(4, 4, 0.65) == 0.65
-        assert skel.min_threshold_for(5, 6, 0.65) == 0.70
-        assert skel.min_threshold_for(9, 9, 0.65) == 0.70
-        assert skel.min_threshold_for(10, 12, 0.65) == 0.85
+    def test_segmented_thresholds(self):
+        """分段档：较长方 ≤3 环 0.50，>3 环 0.75（取代 SK03 的 0.65/0.70/0.85 三段）。"""
+        assert skel.seg_threshold(2, 2) == 0.50
+        assert skel.seg_threshold(2, 3) == 0.50
+        assert skel.seg_threshold(3, 3) == 0.50
+        assert skel.seg_threshold(3, 4) == 0.75      # 分界看较长方，3×4 落长档
+        assert skel.seg_threshold(4, 4) == 0.75
+        assert skel.seg_threshold(10, 12) == 0.75
 
-    def test_short_pair_at_065_merges_at_070_would_not(self):
-        """LCS/min = 2/3 = 0.667 正好落在短弧段两档门槛之间。"""
-        A = self._m("甲乙丙", arc_name="A")            # 3 环
-        B = self._m("甲乙丁戊", arc_name="B")          # 4 环，LCS=2
-        assert abs(skel.can_merge_arcs(A, B, t_short=0.65)[1] - 2 / 3) < 1e-9
-        assert skel.can_merge_arcs(A, B, t_short=0.65)[0] is True
-        assert skel.can_merge_arcs(A, B, t_short=0.70)[0] is False
+    def test_two_beat_pair_at_050_merges_at_075_would_not(self):
+        """2 拍弧格点：LCS/min=1/2=0.50 正好踩分段档短弧门槛（旧 0.65 会拦）。"""
+        A = self._m("甲乙", arc_name="A")
+        B = self._m("甲丙", arc_name="B")
+        ok, score, _ = skel.can_merge_arcs(A, B)
+        assert ok is True and abs(score - 0.5) < 1e-9
+        assert skel.can_merge_arcs(A, B, thr_min=0.75)[0] is False
+
+    def test_three_beat_at_067_merges_under_short_tier(self):
+        """3 拍 × 3 拍，LCS=2 → 0.667 ≥ 0.50 → 并。"""
+        A = self._m("甲乙丙", arc_name="A")
+        B = self._m("甲乙丁", arc_name="B")
+        ok, score, _ = skel.can_merge_arcs(A, B)
+        assert ok is True and abs(score - 2 / 3) < 1e-9
+
+    def test_four_beat_at_050_rejected_under_long_tier(self):
+        """4 拍 × 4 拍，LCS=2 → 0.50 < 0.75 → 不并（长档不放水）。"""
+        A = self._m("甲乙丙丁", arc_name="A")
+        B = self._m("甲乙戊己", arc_name="B")
+        ok, score, why = skel.can_merge_arcs(A, B)
+        assert ok is False and abs(score - 0.5) < 1e-9 and "0.75" in why
 
     def test_max_ratio_blocks_lopsided_pair(self):
         """4 环 vs 12 环只 3 环相同：r_max=0.25 < 0.5 → 拦。"""
