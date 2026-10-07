@@ -998,6 +998,8 @@ class AtomicVariantORM(Base):
     🔴 只存 `atomic_id` 外键，不存原子名/大类名（docs/10 §3.4）：改名与分类调整零影响。
     🔴 `book_name` + `arc_ref` 是**溯源必填**（docs/10 §5.1 三条保护之二）：
        防 AI 编造来源 —— `book_name` 必须真实存在、`arc_ref` 必须能在 chapter_summaries 找到。
+       arc_ref 带 `#win原子` 前缀 = win 文件直提原子（非库内弧），溯源见 tags
+       ——2026-10-07 SK05E 口径
     `hit_count` / `is_variant_of` 是「变体自动追加协议」的判重结果（sim ≥0.85 只计数；
     0.70~0.85 新增并挂 is_variant_of 形成变体族），P1 阶段先只写 draft 行，不参与判重。
     """
