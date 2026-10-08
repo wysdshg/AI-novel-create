@@ -361,6 +361,22 @@ const SOURCE_TAGS = new Set(['v4生成', '史书模板'])
 const DYNASTY_TAGS = new Set(['春秋（东周）', '战国', '秦末', '汉', '楚汉', '东汉', '东汉末', '新莽末', '唐', '东晋', '南宋']) // 新批次加朝代在此追加
 const STATUS_RES = [/^孤例$/, /^占位弧$/, /^含低置信成员$/, /^\d+书$/, /^待定:/]
 
+function subEventOf(t) {
+  const parts = (t.name || '').split('--')
+  return parts.length > 1 ? parts[1].replace(/-\d+$/, '') : null
+}
+
+// 二级联动：选中键大类后，子事件组动态出现（候选从 name 中段实时推导，不依赖 genre_tags）
+const subEventOptions = computed(() => {
+  if (!tagFilter.value) return []
+  const s = new Set()
+  for (const t of list.value) {
+    const parts = (t.name || '').split('--')
+    if (parts[0] === tagFilter.value && parts.length > 1) s.add(parts[1].replace(/-\d+$/, ''))
+  }
+  return [...s].sort()
+})
+
 const allTagGroups = computed(() => {
   const cls = new Set(), src = new Set(), dyn = new Set(), st = new Set()
   for (const t of list.value) {
@@ -375,12 +391,14 @@ const allTagGroups = computed(() => {
     }
   }
   const sorted = (s) => [...s].sort()
-  return [
+  const groups = [
     { label: '键大类', options: sorted(cls) },
     { label: '来源', options: sorted(src) },
     { label: '朝代', options: sorted(dyn) },
     { label: '状态标记', options: sorted(st) },
-  ].filter((g) => g.options.length)
+  ]
+  if (subEventOptions.value.length) groups.splice(1, 0, { label: '子事件', options: subEventOptions.value })
+  return groups.filter((g) => g.options.length)
 })
 
 function beatCount(t) {
@@ -421,7 +439,10 @@ async function loadList() {
     })
     let rows = Array.isArray(data) ? data : data?.items || []
     if (tagFilter.value) {
-      rows = rows.filter((t) => (t.genre_tags || []).includes(tagFilter.value))
+      // 键大类走 genre_tags；子事件（name 中段）走名称匹配——二级联动选择共用一个筛选器
+      rows = rows.filter(
+        (t) => (t.genre_tags || []).includes(tagFilter.value) || subEventOf(t) === tagFilter.value
+      )
     }
     list.value = rows
     total.value = rows.length
