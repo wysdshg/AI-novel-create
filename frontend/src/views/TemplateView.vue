@@ -357,7 +357,7 @@ async function batchReview(status) {
 // 题材标签从当前列表里现取（后端没有单独的 tag 字典端点；反正一次 list 就够）。
 // 2026-10-08 规范化：候选按四组分組展示（键大类/来源/朝代/状态标记），
 // 口径与后端清洗脚本 sk05g_tags_clean.py 一致。
-const SOURCE_TAGS = new Set(['v4生成', '史书模板'])
+const SOURCE_TAGS = new Set(['v4生成', '史书模板', '赘婿模板'])
 const DYNASTY_TAGS = new Set(['春秋（东周）', '战国', '秦末', '汉', '楚汉', '东汉', '东汉末', '新莽末', '唐', '东晋', '南宋']) // 新批次加朝代在此追加
 const STATUS_RES = [/^孤例$/, /^占位弧$/, /^含低置信成员$/, /^\d+书$/, /^待定:/]
 

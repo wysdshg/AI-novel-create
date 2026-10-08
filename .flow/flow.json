@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "AI小说创作智能体",
-  "updatedAt": "2026-10-07T13:09:53.308Z",
+  "updatedAt": "2026-10-08T04:46:32.610Z",
   "modules": {
     "0": {
       "id": "0",
@@ -155,6 +155,16 @@
           "state": "in_progress",
           "createdAt": "2026-10-07T13:09:53.308Z",
           "updatedAt": "2026-10-07T13:09:53.308Z"
+        },
+        "P-ZXSRC": {
+          "id": "P-ZXSRC",
+          "type": "process",
+          "name": "赘婿切原子与模板线",
+          "description": "✅ 全量收官（2026-10-08）：Qoder 四批内容生产（c1~c1262 实有 1223 章）→ 451 原子/42 弧 → PM 分批三板斧验收（接地率 0.45~0.55 转述型、抽开膛零编造）→ zx_ingest 入库 origin=zx_v1，arc active 994→1036，meta 注记剥离、c1258-1262 污染原子排除。词表 86 类实战验证（新环 D11/E04/C21/A12 全用上）。词表权威对质：库+校验脚本为唯一权威，速览快照不作数。",
+          "location": "backend/scripts/zx_ingest.py",
+          "state": "completed",
+          "createdAt": "2026-10-08T04:46:32.608Z",
+          "updatedAt": "2026-10-08T04:46:32.610Z"
         }
       },
       "edges": {
