@@ -47,8 +47,10 @@
         <el-option label="已归档" value="archived" />
       </el-select>
 
-      <el-select v-model="tagFilter" placeholder="题材" clearable style="width: 130px" @change="onTagChange">
-        <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
+      <el-select v-model="tagFilter" placeholder="题材" clearable filterable style="width: 150px" @change="onTagChange">
+        <el-option-group v-for="g in allTagGroups" :key="g.label" :label="g.label">
+          <el-option v-for="t in g.options" :key="t" :label="t" :value="t" />
+        </el-option-group>
       </el-select>
 
       <el-select v-model="bookFilter" placeholder="来源书" clearable style="width: 140px">
@@ -352,11 +354,33 @@ async function batchReview(status) {
   if (statusFilter.value) loadList()
 }
 
-// 题材标签从当前列表里现取（后端没有单独的 tag 字典端点；反正一次 list 就够）
-const allTags = computed(() => {
-  const s = new Set()
-  for (const t of list.value) for (const g of t.genre_tags || []) s.add(g)
-  return [...s].sort()
+// 题材标签从当前列表里现取（后端没有单独的 tag 字典端点；反正一次 list 就够）。
+// 2026-10-08 规范化：候选按四组分組展示（键大类/来源/朝代/状态标记），
+// 口径与后端清洗脚本 sk05g_tags_clean.py 一致。
+const SOURCE_TAGS = new Set(['v4生成', '史书模板'])
+const DYNASTY_TAGS = new Set(['春秋（东周）', '战国', '秦末', '汉', '楚汉', '东汉', '东汉末', '新莽末', '唐', '东晋', '南宋']) // 新批次加朝代在此追加
+const STATUS_RES = [/^孤例$/, /^占位弧$/, /^含低置信成员$/, /^\d+书$/, /^待定:/]
+
+const allTagGroups = computed(() => {
+  const cls = new Set(), src = new Set(), dyn = new Set(), st = new Set()
+  for (const t of list.value) {
+    const nm = t.name || ''
+    const clsName = nm.includes('--') ? nm.split('--', 1)[0] : null
+    for (const g of t.genre_tags || []) {
+      if (SOURCE_TAGS.has(g)) src.add(g)
+      else if (DYNASTY_TAGS.has(g)) dyn.add(g)
+      else if (STATUS_RES.some((re) => re.test(g))) st.add(g)
+      else if (clsName && g === clsName) cls.add(g)
+      else st.add(g) // 未归类兜底进标记组，不静默丢
+    }
+  }
+  const sorted = (s) => [...s].sort()
+  return [
+    { label: '键大类', options: sorted(cls) },
+    { label: '来源', options: sorted(src) },
+    { label: '朝代', options: sorted(dyn) },
+    { label: '状态标记', options: sorted(st) },
+  ].filter((g) => g.options.length)
 })
 
 function beatCount(t) {
