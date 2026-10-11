@@ -40,6 +40,7 @@ from app.routers import (
     feedback,
     # ——Phase 7.1 情节模板库 ——
     graph_rag,    plot_templates,
+    char_templates,   # P-CHARSPLIT 拆表：角色模板独立门牌（2026-10-12）
     # ——Phase 7.2 篇规划 ——
     plans,
     # ——Phase 7.3 角色选角 ——
@@ -79,6 +80,7 @@ for r in (
     eval_router,                                      # Phase 4.1 最小 eval
     usage, feedback,                                  # Phase 4.2/4.3 观测消费端
     plot_templates,                                   # Phase 7.1 情节模板库
+    char_templates,                                   # P-CHARSPLIT：角色模板独立门牌（2026-10-12）
     graph_rag,                                        # docs/09 §3：GraphRAG 注入装配（阶段 A3）
     plans,                                            # Phase 7.2 篇规划
     casting,                                          # Phase 7.3 角色选角

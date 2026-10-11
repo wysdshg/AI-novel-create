@@ -123,7 +123,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { plotTemplateApi } from '@/api/plotTemplate'
+import { charTemplateApi } from '@/api/charTemplate'
 
 const GRADE_NAME = { 5: '全书级', 4: '小说级', 3: '卷级', 2: '篇章级', 1: '断续配角' }
 const TRAIT_LABEL = {
@@ -187,8 +187,8 @@ const shown = computed(() => {
 async function load() {
   loading.value = true
   try {
-    // scale=character 的模板全部拉回，状态在前端过滤（量大但轻）
-    const r = await plotTemplateApi.list({ scale: 'character' })
+    // P-CHARSPLIT：角色模板独立门牌 /character-templates（后端已从展开列合成 structure.cast）
+    const r = await charTemplateApi.list({})
     const data = r?.data ?? r
     list.value = Array.isArray(data) ? data : (data?.items || data || [])
   } finally {

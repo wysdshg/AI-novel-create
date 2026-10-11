@@ -150,11 +150,11 @@
           "id": "P-CHARSPLIT",
           "type": "process",
           "name": "模板域拆表与数据卫生（候选想法）",
-          "description": "新想法，3天冷静期到2026-10-14。动机：plot_templates 是职责大杂烩——角色模板 265 张（scale=character）与剧情弧混装、active 1106 与 archived 880 混装（死行占 39%）、角色数据塞 structure.cast JSON 里。执行方/新会话忘加 scale+status 过滤就会误处理（上次剧情模板用成老款同源），靠文档提醒不可靠，要靠表结构防错。范围三件：①角色模板拆独立表 character_templates——关键减负点：沿用原 id 则 vector_chunks 三路块（plot_cast/char_archetype 各 265）零重嵌；改动面=plot_template_crud 索引与三路清理/plans.py 建卡反查/模板路由/前端/单测；②归档 880 张处置——向量块已清干净（archived 挂块 0），导出 JSON 归档文件或移独立归档表后删主表行，主表瘦身回 1371 行，动手前先排查 plans.py archived 过滤等依赖点；③vector_chunks 分域评估——5 种 source_type（模板三路 6598+ref_doc 154+chapter_memory 22）共用一张 KNN 表，拆分动静大，冷静期内只评估不动手。明确不动：chapter_summaries 19542 行中间态是可回溯资产（凝练/修订需回源到书+章），保留。排期：F7A 验收、P-KEYROUTE 过堂之后作为独立工程，走生产库备份+全量单测铁律。",
+          "description": "用户拍板（2026-10-12）数据库整顿最重要，越过冷静期直接开工。三项拍板：①新表展开成独立列（用户选择，每模板恰好 1 槽已验证 265/265，12 个槽位字段全部展开；保留 structure 原文列兜底防拆装丢字段）；②独立门牌 /character-templates（门牌即防错）；③归档 880 走 A 方案（导 JSON 底片→删行）；④死表清理第二批做。【进度】步骤0 备份完成：DB 级 novel_agent.backup-20261012-拆表.db（254.3MB）+ 全表 2251 行行级 JSON（outputs/_backup/，兼作归档 880 底片）。步骤1 完成：character_templates 建表（沿用原 id → plot_cast/char_archetype 各 265 块零重嵌）+迁移 265 行+逐字段校验 0 错误；源表未动，回滚=DROP 新表。【进度更新 10-12 晚】步骤5 删源行完成：plot_templates 265 行 character 移出（五重验证全过：主表纯 arc 1986 行/新表 265/三路向量零变化/角色源块 265×3/孤儿 0）——角色与剧情弧物理分表达成。热修：迁移三列双重编码（直读文本再 dumps）致前端渲染崩，json_extract 解一层+语义比对 265×3 零丢失修复，记 04-F9。【进度更新 10-12 深夜】步骤6 归档 880 删行完成：底片 outputs/_backup/plot_templates_归档880_20261012.json + 三重验证（主表 1106 纯现役/向量 6068-265-265 零变化/孤儿 0）。**主体完成：plot_templates=1106 纯现役剧情弧 + character_templates=265 角色模板，全库职责单一**。【尾款】步骤2 代码切换（ORM/char_template_crud/独立路由/plans.py 建卡反查/CharTemplateView 前端）；步骤3 单测夹具改+全绿；步骤4 verify（三路向量计数+建卡冒烟+前端手测）；步骤5 删源行（需用户停后端窗口）；步骤6 归档 880 导出+删行（主表瘦到 1106）；vector_chunks 分域只评估不动手。",
           "location": "",
-          "state": "to_plan",
+          "state": "in_progress",
           "createdAt": "2026-10-11T21:30:00.000Z",
-          "updatedAt": "2026-10-11T21:30:00.000Z"
+          "updatedAt": "2026-10-12T02:30:00.000Z"
         },
         "P-HISTSRC": {
           "id": "P-HISTSRC",

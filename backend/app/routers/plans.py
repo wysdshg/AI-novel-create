@@ -116,6 +116,12 @@ def get_planned_char_archetypes(project_id: str, article_id: str, pc_id: str,
             if not text:
                 continue
             trow = db.query(PlotTemplateORM).filter_by(id=src_id).first() if src_id else None
+            if trow is None and src_id:
+                # P-CHARSPLIT（2026-10-12）：角色模板已拆到 character_templates 独立表，
+                # 原型检索（char_archetype）的 source_id 指向新表——双查过渡（删源行后
+                # PlotTemplateORM 查不到自然落到这里）。
+                from app.models.orm import CharacterTemplateORM
+                trow = db.query(CharacterTemplateORM).filter_by(id=src_id).first()
             if trow is None or (trow.status or "") == "archived":
                 continue  # 孤儿块 / 已归档模板（旧向量残留）不进参考卡
             # chunk_text == archetype_text(cate)（确定性）→ 反查结构化槽位

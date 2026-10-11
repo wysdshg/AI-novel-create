@@ -1118,3 +1118,59 @@ class GlobalSkillScaleORM(Base):
     rarity: Mapped[str] = mapped_column(String(10), default="常见")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CharacterTemplateORM(Base):
+    """角色模板（P-CHARSPLIT 拆表，2026-10-12）：从 plot_templates 独立出来的 **scale=character** 专用表。
+
+    拆表动机：plot_templates 混装 arc/character 两职责，执行方忘加 scale 过滤就会误处理
+    （靠文档提醒不可靠，靠表结构防错）。字段由 structure.cast[0] **展开成独立列**
+    （前提已验证：265/265 每模板恰好 1 槽）；`structure` 列保留拆装前**原文**作兜底
+    （展开若有缺字段，原文仍在行里）。
+
+    🔴 **沿用原 id** → vector_chunks 三路块（plot_template/plot_cast/char_archetype 各 265）零重嵌。
+    向量索引复用 plot_template_crud 的块生成函数：本 ORM 暴露 `scale`/`structure` 等
+    duck-type 属性，可直接传给 `index_template` / 三路 remove_source。
+    """
+    __tablename__ = "character_templates"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)      # 原 plot_templates.id
+    name: Mapped[str] = mapped_column(String(120), index=True)         # 模板名（如 伪善领袖型阻碍）
+    genre_tags: Mapped[list] = mapped_column(JSON, default=list)       # 题材标签
+    logline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)  # active|draft|archived
+    # —— 槽位（原 structure.cast[0] 展开列；desc 是 SQL 关键字故列名 slot_desc）——
+    slot: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    slot_desc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mode: Mapped[str | None] = mapped_column(String(20), nullable=True)   # 助力/阻碍
+    slot_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)  # person|goldfinger|entity
+    ranks: Mapped[list] = mapped_column(JSON, default=list)            # 位阶
+    traits: Mapped[dict] = mapped_column(JSON, default=dict)           # 12 维性格刻度
+    trait_basis: Mapped[dict] = mapped_column(JSON, default=dict)      # 性格依据
+    beats: Mapped[list] = mapped_column(JSON, default=list)            # 槽位节拍
+    srcs: Mapped[list] = mapped_column(JSON, default=list)             # 源书实现（选角阈值匹配用）
+    voice: Mapped[dict] = mapped_column(JSON, default=dict)            # F8 L4 语音特征（含 sample_refs 指针）
+    behavior_patterns: Mapped[list] = mapped_column(JSON, default=list)  # F8 L4 行为模式
+    relation_patterns: Mapped[list] = mapped_column(JSON, default=list)  # F8 L4 关系模式（对类不对人）
+    structure: Mapped[dict] = mapped_column(JSON, default=dict)        # 🔴 拆装前原文（兜底）
+    source_stats: Mapped[dict] = mapped_column(JSON, default=dict)     # 溯源（含 book/grade）
+    pitfalls: Mapped[list] = mapped_column(JSON, default=list)
+    rhythm: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 onupdate=datetime.utcnow)
+
+    # duck-type 供 plot_template_crud 块生成函数使用（它们读 t.scale/t.structure）
+    @property
+    def scale(self) -> str:
+        return "character"
+
+    def cast_slot(self) -> dict:
+        """展开列 → 槽位 dict（与原 structure.cast[0] 同构）。以列现值为准。"""
+        return {
+            "slot": self.slot, "desc": self.slot_desc, "mode": self.mode,
+            "slot_kind": self.slot_kind, "ranks": self.ranks or [],
+            "traits": self.traits or {}, "trait_basis": self.trait_basis or {},
+            "beats": self.beats or [], "srcs": self.srcs or [],
+            "voice": self.voice or {}, "behavior_patterns": self.behavior_patterns or [],
+            "relation_patterns": self.relation_patterns or [],
+        }
