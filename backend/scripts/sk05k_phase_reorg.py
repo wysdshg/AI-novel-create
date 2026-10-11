@@ -22,11 +22,15 @@ OUT = Path(r'E:\AI小说创作\outputs\sk05h')
 
 
 def seg_sizes(n):
-    if n <= 4:
-        return [1] * n
-    if n <= 7:
-        return [1, 1, 1, n - 3]
-    return [2, 2, 2, n - 6]
+    """SK03 skel_v4_rebuild.split_phases 原式（环位均分），绝对权威。"""
+    if n <= 0:
+        return []
+    per = max(1, n // 4)
+    idx = [min(3, i // per) if n >= 4 else min(3, i * 4 // n) for i in range(n)]
+    sizes = [0, 0, 0, 0]
+    for i in idx:
+        sizes[i] += 1
+    return [s for s in sizes if s > 0]
 
 
 PHASE_NAMES = {1: ('起',), 2: ('起', '转'), 3: ('起', '承', '转'), 4: ('起', '承', '转', '合')}
