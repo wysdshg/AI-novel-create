@@ -146,6 +146,16 @@
           "createdAt": "2026-10-07T10:44:00.183Z",
           "updatedAt": "2026-10-07T10:44:00.183Z"
         },
+        "P-CHARSPLIT": {
+          "id": "P-CHARSPLIT",
+          "type": "process",
+          "name": "模板域拆表与数据卫生（候选想法）",
+          "description": "新想法，3天冷静期到2026-10-14。动机：plot_templates 是职责大杂烩——角色模板 265 张（scale=character）与剧情弧混装、active 1106 与 archived 880 混装（死行占 39%）、角色数据塞 structure.cast JSON 里。执行方/新会话忘加 scale+status 过滤就会误处理（上次剧情模板用成老款同源），靠文档提醒不可靠，要靠表结构防错。范围三件：①角色模板拆独立表 character_templates——关键减负点：沿用原 id 则 vector_chunks 三路块（plot_cast/char_archetype 各 265）零重嵌；改动面=plot_template_crud 索引与三路清理/plans.py 建卡反查/模板路由/前端/单测；②归档 880 张处置——向量块已清干净（archived 挂块 0），导出 JSON 归档文件或移独立归档表后删主表行，主表瘦身回 1371 行，动手前先排查 plans.py archived 过滤等依赖点；③vector_chunks 分域评估——5 种 source_type（模板三路 6598+ref_doc 154+chapter_memory 22）共用一张 KNN 表，拆分动静大，冷静期内只评估不动手。明确不动：chapter_summaries 19542 行中间态是可回溯资产（凝练/修订需回源到书+章），保留。排期：F7A 验收、P-KEYROUTE 过堂之后作为独立工程，走生产库备份+全量单测铁律。",
+          "location": "",
+          "state": "to_plan",
+          "createdAt": "2026-10-11T21:30:00.000Z",
+          "updatedAt": "2026-10-11T21:30:00.000Z"
+        },
         "P-HISTSRC": {
           "id": "P-HISTSRC",
           "type": "process",
@@ -175,6 +185,26 @@
           "state": "in_progress",
           "createdAt": "2026-10-08T06:08:41.918Z",
           "updatedAt": "2026-10-08T06:08:41.918Z"
+        },
+        "P-DOCGOV": {
+          "id": "P-DOCGOV",
+          "type": "process",
+          "name": "文档治理与记忆体系重组",
+          "description": "用户拍板「数据库表整理最重要」后的先行工程：治文档漂移和记忆混乱。做了四件事——①旧代记忆源物理移出（.workbuddy/.superpowers/docs_archive/outputs 过程纸共 102 项 43524 文件 → E:\\归档文件\\AI小说创作\\2026-10-11-文档大清理\\，只移不删，清单在归档区 _归档清单.md）；②04-踩坑档案重组 v2（保留原编号、修 D5 错位、D4 并 B9、标犯过次数、新增 F 区 7 条平台坑）；③06 手册合并 agent-flow 流程+AIREADME 减重（双入口终结）+切原子任务单升唯一格式权威；④记忆体系终案落地：flow 图为主 + L1 白名单 5 份 + 安全替换流程 + 收尾四件套。残留：10-原子事件文档瘦身对账、03 巨型行瘦身、7 份超限功能文档瘦身、09-数据模型设计归档（待并入 05 核实）。",
+          "location": "docs/04-踩坑档案.md; docs/06-AI工作手册.md; docs/任务单模板-切原子.md; E:\\归档文件\\AI小说创作\\2026-10-11-文档大清理\\_归档清单.md",
+          "state": "completed",
+          "createdAt": "2026-10-11T23:30:00.000Z",
+          "updatedAt": "2026-10-11T23:30:00.000Z"
+        },
+        "P-F7A": {
+          "id": "P-F7A",
+          "type": "process",
+          "name": "F7A 我是掌门概括停闸修复（验收关账）",
+          "description": "事故：我是掌门跑概括批触发复制退化停闸，且流式路限流占额只借不还（_inflight 单调累积→触顶后 acquire 永久阻塞=静默死锁）。修复（2026-10-08 裁 A+C 同批修，授权原执行方）：A=补跑路径两处写库前挂 B20 复制退化闸（升级为簇检测——ch149/150/151 逐字相同，只标后一章会让簇首带退化文本入库），再退化记台账不写库不无限重试；C=流式三条出口补 rate.record（成功按真实 usage、失败/兜底归 0）。PM 验收（10-11）：开膛 diff 对照裁决书全对上、单测 870 全绿（新增 13）、跑批 2854/2854=100% 无停闸、退化 6 章按裁决删行重生成、台账 13 条自然补齐入库。遗留两条已挂账：非相邻逐字重复 15 组/34 章=B20 相邻比对盲区（04-F8，处置待用户拍板）；概括长度越界 765 章仅记录。",
+          "location": "backend/app/services/plot_import.py; backend/tests/unit/test_plot_import_b20c_f7a.py; outputs/f7a/进度台账.md; outputs/f7a/pm-verdict-停闸裁决.md",
+          "state": "completed",
+          "createdAt": "2026-10-11T23:50:00.000Z",
+          "updatedAt": "2026-10-11T23:50:00.000Z"
         }
       },
       "edges": {
