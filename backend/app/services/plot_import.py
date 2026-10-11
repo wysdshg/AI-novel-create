@@ -99,6 +99,49 @@ TPM_WINDOW_S = 60.0
 TOKEN_PER_CHAR = 0.7            # 中文粗估（Qwen 系约 0.6~0.8 token/字）
 OUT_TOKENS_PER_CHAPTER = 200    # 逐章概括的输出预估（80~120 字摘要 + JSON 结构）
 
+# ── F7A（2026-10-08）：复制退化「补跑后仍未解决」台账 ──────────────────────
+# 补跑路径挂上 B20 闸后，仍会退化的章**不写库**（退化摘要会污染下游，见 _dup_summary_chapters）。
+# 但也不能无限重试（同 prompt 同模型，退化是模型行为不是随机抖动，重跑大概率复现），
+# 故记台账交人工/换模型统一处置。追加语义（跨 chunk、跨次跑批累积）。
+# 🔴 本文件在 backend/app/services/ → 仓库根要上溯 **4** 级
+#   （services→app→backend→repo）。用 parents[2] 会落到 backend/outputs/ 下（已踩过：
+#   台账跑到 backend/outputs/f7a/ 而不是仓库根 outputs/f7a/，PM 按约定路径找不到）。
+DEGENERATE_LEDGER_PATH = str(
+    Path(__file__).resolve().parents[3] / "outputs" / "f7a" / "退化未解决.json")
+
+
+def _record_unresolved_degenerate(book_name: str, rows: list[dict]) -> None:
+    """记「补跑后仍复制退化」的章到台账。**旁路：写失败只告警，绝不影响跑批。**"""
+    if not rows:
+        return
+    try:
+        p = Path(DEGENERATE_LEDGER_PATH)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data: dict = {"book": book_name, "entries": []}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                pass        # 台账坏了就重建，不让它挡住本轮记账
+        entries = data.get("entries") or []
+        seen = {(e.get("book_name"), e.get("chapter_no")) for e in entries}
+        for r in rows:
+            e = {"book_name": book_name, "chapter_no": r.get("chapter_no"),
+                 "title": r.get("title"), "summary": r.get("summary"),
+                 "reason": r.get("reason") or "dup_after_retry",
+                 "ts": datetime.now().isoformat(timespec="seconds")}
+            if (book_name, e["chapter_no"]) in seen:
+                continue
+            seen.add((book_name, e["chapter_no"]))
+            entries.append(e)
+        data["book"] = book_name
+        data["entries"] = entries
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.warning(f"[plot_import] 补跑后仍复制退化 → 记台账不写库: 第 "
+                       f"{sorted(r.get('chapter_no') for r in rows)} 章（{book_name}）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plot_import] 退化台账写入失败（不影响跑批）: {type(e).__name__}: {e}")
+
 
 def est_tokens(chars: int) -> int:
     """按字符数粗估 token —— 只用于**发送前**的额度预算，不求精确。"""
@@ -536,17 +579,23 @@ def _chat_post_stream(url: str, key: str, body: dict, *, timeout: int = GW_STREA
     last: Exception | None = None
     for attempt in range(n):
         try:
-            rate.acquire(est)
+            leased = rate.acquire(est)
         except Exception:  # noqa: BLE001
-            pass
+            leased = None
         t0 = time.time()
         try:
             text, usage = _stream_text(url, key, body, timeout=timeout)
             if on_usage:
                 _safe_usage_cb(on_usage, usage, int((time.time() - t0) * 1000), True)
+            # 🔴 F7A-C（2026-10-08）：必须归还 acquire 占的额，否则 RateLimiter._inflight
+            # 单调累积、永不回落 → 触顶后 acquire() 的 while True 永久阻塞（静默死锁：
+            # 不抛异常、不超时、进程存活、零吞吐）。非流式 _chat_post 一直有这一步，
+            # 流式路漏了 —— 走网关的调用全在漏。语义对齐非流式：成功按真实 usage 纠正。
+            rate.record(leased, usage_total(usage))
             return text
         except RuntimeError as e:
             last = e
+            rate.record(leased, 0)   # 失败/超时归还占额但不记用量（同非流式 L429）
             # 空正文/断连这类**重试无意义**的，直接上抛（让上层拿到明确错因）
             if "空正文" in str(e):
                 raise
@@ -554,6 +603,11 @@ def _chat_post_stream(url: str, key: str, body: dict, *, timeout: int = GW_STREA
             # 最后一次不再睡（没人会等下一次了），也不重试
             if attempt + 1 < n:
                 time.sleep(min(2.0 * (attempt + 1), 8.0))
+        except BaseException:
+            # 兜底出口：非 RuntimeError（如 URLError/KeyboardInterrupt）也得还占额，
+            # 否则同样泄漏。归还后原样上抛，不改变既有异常语义。
+            rate.record(leased, 0)
+            raise
     raise RuntimeError(f"{label} 流式调用重试 {n} 次仍失败: {last}")
 
 
@@ -856,6 +910,20 @@ def _dup_summary_chapters(got: dict[int, str], batch: list[dict],
     下游（弧归并 / 标签 / 模板凝练）会原样继承这个错误，且**没有任何告警**。
     """
     nos = [c["no"] for c in batch if got.get(c["no"])]
+    dup: set[int] = _dup_pairs(nos, got, threshold)
+    if dup:
+        logger.warning(f"[plot_import] 摘要疑似复制退化（相邻相似度 ≥{threshold}）"
+                       f"→ 转补跑重算: 第 {sorted(dup)} 章")
+    return dup
+
+
+def _dup_pairs(nos: list[int], got: dict[int, str],
+               threshold: float = _DUP_SUMMARY_RATIO) -> set[int]:
+    """按给定章序两两比退化，返回「后一章」的章号集合。**静默**（不报警）。
+
+    与 `_dup_summary_chapters` 同口径但只标后一章 —— 主批沿用原语义（保留一段里的首个，
+    它可能是真实内容）。
+    """
     dup: set[int] = set()
     for prev, cur in zip(nos, nos[1:]):
         a, b = got[prev], got[cur]
@@ -865,10 +933,32 @@ def _dup_summary_chapters(got: dict[int, str], batch: list[dict],
         if abs(len(a) - len(b)) <= max(8, int(0.2 * max(len(a), len(b)))):
             if difflib.SequenceMatcher(None, a, b).ratio() >= threshold:
                 dup.add(cur)
-    if dup:
-        logger.warning(f"[plot_import] 摘要疑似复制退化（相邻相似度 ≥{threshold}）"
-                       f"→ 转补跑重算: 第 {sorted(dup)} 章")
     return dup
+
+
+def _dup_cluster(nos: list[int], got: dict[int, str],
+                 threshold: float = _DUP_SUMMARY_RATIO) -> set[int]:
+    """退化**簇**：返回所有参与退化的章号（不止后一章）。**静默**（不报警）。
+
+    为什么补跑路径要用簇而不是 `_dup_pairs`：
+    进补跑的这些章**本身就是**因为主批退化/漏章才被捞出来的 —— 它们的概括已被怀疑。
+    实测（我是掌门 160 章样本）ch149/150/151 三章概括**逐字节相同**，若只标后一章，
+    簇首那章照样带着同一段退化文本入库（正是本次事故形态）。
+    而且复制退化是**模型行为**不是随机抖动：一批 10 章全退化时，同 prompt 重跑仍全退化，
+    簇里没有哪一章是可信的。所以簇内全部拒收、交台账，由人/换模型处置。
+    """
+    dup = _dup_pairs(nos, got, threshold)
+    if not dup:
+        return set()
+    # 逐字相同 -> 全员；近似 -> 连带首个
+    by_text: dict[str, list[int]] = {}
+    for no in nos:
+        by_text.setdefault(got[no], []).append(no)
+    cluster: set[int] = set(dup)
+    for members in by_text.values():
+        if len(members) > 1:
+            cluster.update(members)
+    return cluster
 
 
 def _summarize_prompt(title: str, text: str) -> str:
@@ -1064,6 +1154,7 @@ def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
     # 策略分两级：**优先把漏章重新凑批再跑一轮批量**（省得多：3 章批量 ~15s vs 单章 3×30s），
     # 仍漏的才用单章兜底（极少发生）。不依赖"下次重跑命令"来兜，让单轮尽量补齐。
     retried = 0
+    unresolved_degenerate: list[dict] = []
     if missed:
         retried = len(missed)
         still_missing: list[dict] = []
@@ -1073,10 +1164,21 @@ def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[plot_import] 漏章批量补跑失败: {type(e).__name__}: {e}")
                 got = {}
+            # 🔴 F7A-A（2026-10-08）：补跑**必须再过一次 B20 闸**。
+            # 原来只有主批路径挂了检测（见 _persist），补跑写库裸奔 —— 实测（我是掌门
+            # 跑批）主批拦下的 ch149/150/151 在补跑里带着**同一段退化文本**直接入库。
+            # 复制退化是模型行为不是随机抖动，重跑大概率复现，所以这道闸不是摆设。
+            nos_here = [c["no"] for c in sb if got.get(c["no"])]
+            dup_here = _dup_cluster(nos_here, got)
             for c in sb:
                 s = got.get(c["no"])
-                if not s:
-                    still_missing.append(c)
+                if not s or c["no"] in dup_here:
+                    if s and c["no"] in dup_here:
+                        unresolved_degenerate.append(
+                            {"chapter_no": c["no"], "title": c["title"],
+                             "summary": s, "reason": "dup_after_retry"})
+                    else:
+                        still_missing.append(c)
                     continue
                 db.add(ChapterSummaryORM(
                     id=uuid.uuid4().hex, book_name=book_name, chapter_no=c["no"],
@@ -1085,6 +1187,7 @@ def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
         db.commit()
 
         # 兜底：批量仍漏的用单章 prompt（更简单、成功率更高）
+        got_single: dict[int, str] = {}
         for c in still_missing:
             try:
                 s = _sf_post(key, _summarize_prompt(c["title"], read_text(c["path"])),
@@ -1096,15 +1199,31 @@ def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
                 s = ""
                 logger.warning(f"[plot_import] 第{c['no']}章单章补跑失败（重跑命令可再补）: "
                                f"{type(e).__name__}: {e}")
+            if s:
+                got_single[c["no"]] = s
+        # 单章兜底同样挂 B20 闸（批量补跑已判退化的不进这里，但仍可能两两退化）
+        nos_single = [c["no"] for c in still_missing if got_single.get(c["no"])]
+        dup_single = _dup_cluster(nos_single, got_single)
+        for c in still_missing:
+            s = got_single.get(c["no"])
             if not s:
                 failed += 1
+                continue
+            if c["no"] in dup_single:
+                unresolved_degenerate.append(
+                    {"chapter_no": c["no"], "title": c["title"],
+                     "summary": s, "reason": "dup_after_single_retry"})
+                failed += 1        # 计入缺口：没写库就是缺，覆盖统计查得出
                 continue
             db.add(ChapterSummaryORM(
                 id=uuid.uuid4().hex, book_name=book_name, chapter_no=c["no"],
                 title=c["title"] or None, summary=s, created_at=datetime.utcnow()))
             done += 1
         db.commit()
-        logger.info(f"[plot_import] 漏章补跑：{retried} 章，批量+单章兜底后仍失败 {failed}")
+        # 再退化的交台账，由人/换模型统一处置 —— 不无限重试（同 prompt 同模型必复现）
+        _record_unresolved_degenerate(book_name, unresolved_degenerate)
+        logger.info(f"[plot_import] 漏章补跑：{retried} 章，批量+单章兜底后仍失败 {failed}"
+                    f"，补跑后仍复制退化 {len(unresolved_degenerate)} 章（记台账）")
 
     return {"done": done, "skipped": skipped, "failed": failed,
             "failed_batches": failed_batches, "batches": len(batches),
