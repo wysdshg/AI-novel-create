@@ -150,11 +150,21 @@
           "id": "P-CHARSPLIT",
           "type": "process",
           "name": "模板域拆表与数据卫生（候选想法）",
-          "description": "用户拍板（2026-10-12）数据库整顿最重要，越过冷静期直接开工。三项拍板：①新表展开成独立列（用户选择，每模板恰好 1 槽已验证 265/265，12 个槽位字段全部展开；保留 structure 原文列兜底防拆装丢字段）；②独立门牌 /character-templates（门牌即防错）；③归档 880 走 A 方案（导 JSON 底片→删行）；④死表清理第二批做。【进度】步骤0 备份完成：DB 级 novel_agent.backup-20261012-拆表.db（254.3MB）+ 全表 2251 行行级 JSON（outputs/_backup/，兼作归档 880 底片）。步骤1 完成：character_templates 建表（沿用原 id → plot_cast/char_archetype 各 265 块零重嵌）+迁移 265 行+逐字段校验 0 错误；源表未动，回滚=DROP 新表。【进度更新 10-12 晚】步骤5 删源行完成：plot_templates 265 行 character 移出（五重验证全过：主表纯 arc 1986 行/新表 265/三路向量零变化/角色源块 265×3/孤儿 0）——角色与剧情弧物理分表达成。热修：迁移三列双重编码（直读文本再 dumps）致前端渲染崩，json_extract 解一层+语义比对 265×3 零丢失修复，记 04-F9。【进度更新 10-12 深夜】步骤6 归档 880 删行完成：底片 outputs/_backup/plot_templates_归档880_20261012.json + 三重验证（主表 1106 纯现役/向量 6068-265-265 零变化/孤儿 0）。**主体完成：plot_templates=1106 纯现役剧情弧 + character_templates=265 角色模板，全库职责单一**。【尾款】步骤2 代码切换（ORM/char_template_crud/独立路由/plans.py 建卡反查/CharTemplateView 前端）；步骤3 单测夹具改+全绿；步骤4 verify（三路向量计数+建卡冒烟+前端手测）；步骤5 删源行（需用户停后端窗口）；步骤6 归档 880 导出+删行（主表瘦到 1106）；vector_chunks 分域只评估不动手。",
+          "description": "【收官 2026-10-13】plot_templates=1106 纯现役剧情弧 + character_templates=265 角色模板，全库职责单一。落地件：①新表 12 槽位展开独立列+structure 原文保底列（沿用原 id 零重嵌，265/265 校验）；②独立门牌 /character-templates（char_template_crud+独立路由+前端 CharTemplateView）；③归档 880 走 A 方案（底片 outputs/_backup/plot_templates_归档880_20261012.json→删行）；④删源行 265（五重验证）。坑记录：迁移三列双重编码致前端崩（04-F9 deepcopy 语义）；update 通道 deepcopy 再改。尾款：死表清理第二批、vector_chunks 分域只评估不动手。",
           "location": "",
-          "state": "in_progress",
+          "state": "completed",
           "createdAt": "2026-10-11T21:30:00.000Z",
-          "updatedAt": "2026-10-12T02:30:00.000Z"
+          "updatedAt": "2026-10-13T14:30:00.000Z"
+        },
+        "F8-HANMEN-CHAR": {
+          "id": "F8-HANMEN-CHAR",
+          "type": "process",
+          "name": "F8 寒门枭士角色模板线（Qoder 全程）",
+          "description": "【收官 2026-10-13】P0 分诊 86/86 → 密度定档（档0=262/档1=176/档2=71/档3=53/档4=57/档5=3）→ P1 提取 → P2 草稿 → 档2 归并 83→13 张综合（F8 §3.4 六件套）→ 79 张终稿（档5 2/档4 36/档3 28/档2 综合 13，提取 833 条，PM 二刃复算零违规）→ 官方化匿名化（66 anon 管线脱敏+13 agg 人工包装）→ f8_p_append 第四次入库成功。终态：character_templates=344（265+79），79 名全凡人式六字正名零兜底，三路向量 plot_cast/char_archetype=344 逐行≥3 块，tags 透传（13 聚合带聚合/综合位、敌营转向型通道带行为位），c1450→c1445~1447 勘误已传导。坑：三次假入库根因=aggregate 误放模板名进黑名单+管线后台补写 agg+agg 分支 key=slot 互覆盖（修 canonical(source_name)+name 回填）；DB 快照热覆盖 WAL 回放 malformed 事故（杀进程删 wal 恢复快照）；f8_p_append 核账/补索引查错旧表（修指新表）。已知局限：proper_nouns 黑名单混通称（核账口径只拦真名级专名）；洪涛平 c1451 补依据为草稿层报备项不阻塞。尾款挂账：寒门概括层重灌债（66+157）。",
+          "location": "outputs/task-QODER-CHAR-HANMEN.md; outputs/char_hanmen/; scripts/f8_p_append.py",
+          "state": "completed",
+          "createdAt": "2026-10-13T14:30:00.000Z",
+          "updatedAt": "2026-10-13T14:30:00.000Z"
         },
         "P-HISTSRC": {
           "id": "P-HISTSRC",
