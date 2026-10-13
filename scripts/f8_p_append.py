@@ -98,8 +98,13 @@ def main():
         elif p.startswith("agg_") and p.endswith(".json"):
             t = json.load(open(os.path.join(args.official_dir, p), encoding="utf-8"))
             m = t.pop("_meta", {})
-            key = t.get("slot") or os.path.basename(p)
+            # 🔴 修复（2026-10-13）：原 key=t.get("slot")——13 张综合仅 3 种 slot 互相覆盖只剩 1 张
+            key = canonical(m.get("source_name", "")) or t.get("slot") or os.path.basename(p)
             by_canon[key] = {"tpl": t, "grade": 2, "src": key, "cluster": True}
+    # 🔴 name 回填：管线 LLM 脱敏可能丢 name 字段——从 source_name 去 grade 前缀取正名
+    for key, v in by_canon.items():
+        if not (v["tpl"].get("name") or "").strip():
+            v["tpl"]["name"] = re.sub(r"^\d+_", "", key)
     print(f"[1] 官方模板 {len(by_canon)} 个", flush=True)
 
     # 黑名单
@@ -111,40 +116,41 @@ def main():
         pn.update(r.get("aliases") or [])
     pn = {w for w in pn if 1 < len(w) <= 8} - GENERIC
 
-    # ---- 2. LLM 功能命名 ----
+    # ---- 2. 命名：优先用模板自带 name（寒门批已定凡人式名，禁止 LLM 覆盖）；缺名才 LLM 兜底 ----
     items = []
     for key, v in by_canon.items():
         t = v["tpl"]
+        if (t.get("name") or "").strip():
+            continue  # 自带名，跳过
         top = sorted(t.get("traits", {}).items(), key=lambda x: -abs(x[1]))[:3]
         items.append({"key": key, "slot": t.get("slot"), "mode": t.get("mode"),
                       "desc": (t.get("desc") or "")[:80],
                       "top": [f"{k}{val:+d}" for k, val in top]})
     api_key = args.api_key or gw_key()
     names_map = {}
-    try:
-        content = chat_once(
+    if items:
+        prompt = (
             "下面是 JSON 数组，每项是一条角色功能模板。给每条起「模板名」：≤10 字、彼此不重名、"
-            "禁止任何人名/书名/门派名等专名。命名公式：【两三个性格/行事词】+ 型 + 【功能位或关系称谓】。金标准示例（凡人修仙传实测用户好评）：
-- 热络谨慎型前辈（议事引路的事务型前辈，热络+谨慎）
-- 化身引路型师友（陪练化身的师友，兼具指路、磨砺）
-- 重情急躁型少侠（重情+急躁的少侠）
-- 利诱分宝型宿敌（以利诱分宝拉拢同行的宿敌）
-- 果决护族型圣女、狠辣围杀型阻碍、冷傲亦敌型妖友
-反例（禁止）：少年复仇、冷酷掌权、宗子执行、成长经营——这些是**情节概括/身份标签**，看不出性格与相处方式，不是模板名。名字要让作者一眼看出「这是个什么性子的人、和主角怎么相处」。\n\n"
+            "禁止任何人名/书名/门派名等专名。命名公式：【两三个性格/行事词】+ 型 + 【功能位或关系称谓】。"
+            "金标准示例（凡人修仙传实测用户好评）：热络谨慎型前辈、化身引路型师友、重情急躁型少侠、"
+            "利诱分宝型宿敌、果决护族型圣女、狠辣围杀型阻碍、冷傲亦敌型妖友。"
+            "反例（禁止）：少年复仇、冷酷掌权、宗子执行、成长经营——这些是情节概括/身份标签，"
+            "看不出性格与相处方式，不是模板名。名字要让作者一眼看出「这是个什么性子的人、和主角怎么相处」。\n\n"
             "输出严格 JSON：{\"names\":[{\"key\":\"原key原样\",\"name\":\"模板名\"}]}，必须覆盖全部 "
-            + str(len(items)) + " 条。\n\n" + json.dumps(items, ensure_ascii=False),
-            api_key, args.gateway, args.model)
-        text = re.sub(r"```(?:json)?", "", content).strip()
-        data = json.loads(text[text.find("{"): text.rfind("}") + 1])
-        for it in data.get("names", []):
-            k, nm = it.get("key"), (it.get("name") or "").strip()
-            if k and nm and 1 < len(nm) <= 14:
-                names_map[k] = nm
-    except Exception as e:  # noqa: BLE001
-        print(f"[2] 命名失败走兜底: {e}", flush=True)
+            + str(len(items)) + " 条。\n\n" + json.dumps(items, ensure_ascii=False))
+        try:
+            content = chat_once(prompt, api_key, args.gateway, args.model)
+            text = re.sub(r"```(?:json)?", "", content).strip()
+            data = json.loads(text[text.find("{"): text.rfind("}") + 1])
+            for it in data.get("names", []):
+                k, nm = it.get("key"), (it.get("name") or "").strip()
+                if k and nm and 1 < len(nm) <= 14:
+                    names_map[k] = nm
+        except Exception as e:  # noqa: BLE001
+            print(f"[2] 命名失败走兜底: {e}", flush=True)
     seen = set()
     for key, v in by_canon.items():
-        nm = names_map.get(key)
+        nm = (v["tpl"].get("name") or "").strip() or names_map.get(key)
         if not nm or (set(re.findall(r"[\u4e00-\u9fff]+", nm)) & {w for w in pn if len(w) >= 2}):
             nm = f"{v['tpl'].get('slot') or '角色'}·{v['grade']}档"
         base, i = nm, 2
@@ -153,15 +159,39 @@ def main():
             i += 1
         seen.add(nm)
         v["row_name"] = nm
-    print(f"[2] 命名完成（LLM {len(names_map)}/{len(items)}）", flush=True)
+    print(f"[2] 命名完成（自带名优先，LLM 兜底 {len(names_map)}）", flush=True)
 
     # ---- 3. 写库（append，不退役） ----
+    # 🔴 traits 键归一化依赖（自 f8_official_pipeline 复制——该脚本 import 即执行 main，不能直接 import）
+    TRAIT_LABEL = {"altruism": "利他↔自私", "honor": "信义↔背信", "mercy": "仁慈↔狠辣",
+                   "resolve": "坚毅↔易摧", "decisiveness": "果决↔犹豫", "discipline": "自律↔放纵",
+                   "risk": "冒险↔稳健", "rationality": "理性↔冲动", "guile": "城府↔直率",
+                   "idealism": "理想↔务实", "warmth": "热忱↔冷漠", "dominance": "强势↔随和"}
+    LABEL2KEY = {v: k for k, v in TRAIT_LABEL.items()}
+
+    def normalize_traits(traits):
+        """聚合 LLM 可能用中文标签当 traits 键 → 归一化成 12 维英文键。"""
+        out, dropped = {}, []
+        for k, v in (traits or {}).items():
+            key = LABEL2KEY.get(k.strip(), k.strip())
+            if key not in TRAIT_LABEL:
+                dropped.append(k)
+                continue
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                dropped.append(k)
+                continue
+            out[key] = max(-10, min(10, v))
+        return out, dropped
+
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
     import app.core.database as dbmod
-    from app.models.orm import PlotTemplateORM, VectorChunkORM
+    from app.models.orm import PlotTemplateORM, VectorChunkORM, CharacterTemplateORM
     from app.services import plot_template_crud as tpl_crud
+    from app.services import char_template_crud as char_crud  # P-CHARSPLIT：角色模板写新表
 
     eng = create_engine(dbmod.DEFAULT_DB_URL, poolclass=StaticPool,
                         connect_args={"check_same_thread": False})
@@ -183,9 +213,15 @@ def main():
             "relation_patterns": t.get("relation_patterns") or [],
             "slot_kind": "person", "beats": [], "srcs": [],
         }
-        o = tpl_crud.create(db, {
-            "name": v["row_name"], "scale": "character",
-            "genre_tags": ["角色模板", f"档{g}"] + (["聚合"] if v.get("cluster") else []),
+        # 🔴 tags 透传（2026-10-13 用户拍板）：草稿 JSON 的 tags 已含 综合位/行为位 等检索标注，
+        #    优先透传；无 tags 才当场拼兜底（旧口径丢标注的坑）
+        tags_in = t.get("tags") or []
+        base_tags = ["角色模板", f"档{g}"] + (["聚合"] if v.get("cluster") else [])
+        genre_tags = tags_in if tags_in else base_tags
+        # 🔴 P-CHARSPLIT：角色模板走 char_templates 新表（旧表 character 行已删，写旧表=数据进错地方）
+        o = char_crud.create(db, {
+            "name": v["row_name"],
+            "genre_tags": genre_tags,
             "logline": (t.get("desc") or "").strip()[:100],
             "structure": {"cast": [item]}, "pitfalls": [], "rhythm": None,
             "source_stats": {"origin": "f8_p0_anonymized", "book": args.book,
@@ -203,7 +239,7 @@ def main():
             VectorChunkORM.source_id == rec["id"],
             VectorChunkORM.source_type.in_(("plot_template", "plot_cast", "char_archetype"))).count()
         if n < 3:
-            trow = db.query(PlotTemplateORM).filter_by(id=rec["id"]).first()
+            trow = db.query(CharacterTemplateORM).filter_by(id=rec["id"]).first()
             tpl_crud.index_template(db, trow)
             db.commit()
             fixed.append(rec["name"])
@@ -213,8 +249,8 @@ def main():
     # ---- 4. 跨进程终审 ----
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    active = con.execute("SELECT id, name, logline, structure FROM plot_templates "
-                          "WHERE status='active'").fetchall()
+    active = con.execute("SELECT id, name, logline, structure FROM character_templates "
+                         "WHERE status='active'").fetchall()
     by_id = {r["id"]: r for r in active}
     audit_bad = []
     for rec in inserted:
