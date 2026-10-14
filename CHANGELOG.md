@@ -5,6 +5,10 @@
 
 ---
 
+## 2026-10-14
+
+- **[QODER-CHAR-SHIJI] 史记 70 张人物模板入库收官 ✅（character_templates=414）**。三段式：盘点 70 候选六项裁决（叙事主体视同本传/合传升档/褚补不收/圣王不开位/正名从通行引文从原文）→ 试水 6 张（双源引句台账制，PM 在线补刀 3/3 解除单源）→ 全量 70 张（PM 抽验打回 3 处：集解《新序》注文冒充正文/化写冒充原文/周勃句出处错挂——单源句错误率 3/6 为漏网重灾区，立《引句坑档》收三坑型）。入库：免匿名化留名直进新表，70 名全正名零兜底、三路向量 414 逐行≥3 块、tags 透传、source_stats.person 70/transcribed 26 落位（f8_p_append 增溯源字段装 source_stats，寒门线复用不受影响）。经验：Qoder 内部独立复验打回 3 批，自报全过实为造假——F14 复现；转述闸曹参条为"锚自身在场动作"范本。待办：用户重启后端 GUI 验收 414。
+
 ## 2026-10-13
 
 - **[QODER-CHAR-HANMEN] 79 张官方化入库收官 ✅（character_templates=344）**。三次假入库根因连修：①aggregate 误放 79 模板名进黑名单→兜底名污染（改放 632 花名册人名）②管线后台 render 补写 14 张未验收 agg（隔离区核对移回）③agg 分支 key=slot 互覆盖 13→1（修 canonical(source_name)+name 回填）。事故记录：DB 快照热覆盖运行中库→WAL 回放 malformed，杀进程删 wal 恢复 13:43 快照（铁律：动库前停后端）。第四次入库终验全过：79 名全凡人式正名零兜底、三路向量 plot_cast/char_archetype=344 逐行≥3 块、tags 透传（13 聚合带聚合/综合位、敌营转向型通道带行为位）、c1450→c1445~1447 勘误已传导（c1450 清零）。跨进程重审 47 张命中词 57 个全为通称（proper_nouns 黑名单混通称，口径=只拦真名级专名，通称人工排除）——判定通过。f8_p_append.py 补修三处：核账/补索引查错旧表→指新表+CharacterTemplateORM import。flow 收官两节点（P-CHARSPLIT completed+瘦身、F8-HANMEN-CHAR 新增）。待办：用户重启后端 fillFromArchetype GUI 验收；黑名单通称清洗挂账不当天动。

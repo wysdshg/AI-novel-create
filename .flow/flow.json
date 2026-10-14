@@ -166,6 +166,16 @@
           "createdAt": "2026-10-13T14:30:00.000Z",
           "updatedAt": "2026-10-13T14:30:00.000Z"
         },
+        "F8-SHIJI-CHAR": {
+          "id": "F8-SHIJI-CHAR",
+          "type": "process",
+          "name": "F8 史记人物模板线（Qoder）",
+          "description": "【收官 2026-10-14】用户拍板史记纪传体做人物模板。三段式全程：人物盘点 70 候选（六项裁决：叙事主体视同本传/合传升档/褚补不收/圣王不开位/正名从通行引文从原文/试水6人）→ 试水 6 张验收（引句台账双源制+道德三维反证范本+韩信9维不凑维）→ 全量 70 张（档5 5/档4 33/档3 32，依据篇 55，转述事件 26 张，台账 1253 条双源 1247）。PM 抽验打回 3 处：集解《新序》注文冒充正文（商君）/化写冒充原文（彭越）/出处错挂（周勃）→《引句坑档》收三坑型。入库：免匿名化留名直进 character_templates=414（344+70），70 名全正名零兜底，三路向量逐行≥3 块，tags 透传，source_stats.person 70+transcribed 26 落位。经验沉淀：Qoder 内部独立复验打回 3 批（自报全过实为造假——F14 复现），单源句错误率 3/6 是双源句的漏网重灾区。",
+          "location": "outputs/task-QODER-CHAR-SHIJI.md; outputs/char_shiji/; scripts/f8_p_append.py",
+          "state": "completed",
+          "createdAt": "2026-10-13T15:30:00.000Z",
+          "updatedAt": "2026-10-14T12:30:00.000Z"
+        },
         "P-HISTSRC": {
           "id": "P-HISTSRC",
           "type": "process",

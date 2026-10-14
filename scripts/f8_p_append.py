@@ -94,7 +94,8 @@ def main():
             m = t.pop("_meta", {})
             key = canonical(m.get("source_name", ""))
             if key and key not in by_canon:
-                by_canon[key] = {"tpl": t, "grade": m.get("grade"), "src": key, "cluster": False}
+                by_canon[key] = {"tpl": t, "grade": m.get("grade"), "src": key,
+                                 "cluster": False, "person": m.get("person")}
         elif p.startswith("agg_") and p.endswith(".json"):
             t = json.load(open(os.path.join(args.official_dir, p), encoding="utf-8"))
             m = t.pop("_meta", {})
@@ -219,14 +220,21 @@ def main():
         base_tags = ["角色模板", f"档{g}"] + (["聚合"] if v.get("cluster") else [])
         genre_tags = tags_in if tags_in else base_tags
         # 🔴 P-CHARSPLIT：角色模板走 char_templates 新表（旧表 character 行已删，写旧表=数据进错地方）
+        # 🔴 溯源字段：转述事件+人物归属 随 source_stats 入库（史书线 [QODER-CHAR-SHIJI] 裁决，
+        #    character_templates 无专列，装 source_stats 不丢；寒门线无此字段时自动为空不落）
+        ss = {"origin": "f8_p0_anonymized", "book": args.book,
+              "grade": g, "source_name": v["src"],
+              "member_count": t.get("member_count") or 1}
+        if t.get("转述事件"):
+            ss["transcribed"] = t["转述事件"]
+        if v.get("person"):
+            ss["person"] = v["person"]
         o = char_crud.create(db, {
             "name": v["row_name"],
             "genre_tags": genre_tags,
             "logline": (t.get("desc") or "").strip()[:100],
             "structure": {"cast": [item]}, "pitfalls": [], "rhythm": None,
-            "source_stats": {"origin": "f8_p0_anonymized", "book": args.book,
-                              "grade": g, "source_name": v["src"],
-                              "member_count": t.get("member_count") or 1},
+            "source_stats": ss,
             "status": "active",
         })
         inserted.append({"id": o.id, "name": o.name, "grade": g, "src": v["src"]})
