@@ -176,6 +176,16 @@
           "createdAt": "2026-10-13T15:30:00.000Z",
           "updatedAt": "2026-10-14T12:30:00.000Z"
         },
+        "PM-HANDOFF-1014": {
+          "id": "PM-HANDOFF-1014",
+          "type": "process",
+          "name": "PM 交接文档 20261014",
+          "description": "【完成 2026-10-14】.flow/docs/pm-handoff-20261014.md（唯一入口）。重要用户反馈入档：史书线质量实测显著优于网文线（史记 70 张≈寒门 4~5 档水准）——后续角色模板放量优先史书线（资治通鉴/汉书/左传），网文线降优先级。已同步项目记忆 Hard Constraints。",
+          "location": ".flow/docs/pm-handoff-20261014.md",
+          "state": "completed",
+          "createdAt": "2026-10-14T13:00:00.000Z",
+          "updatedAt": "2026-10-14T13:00:00.000Z"
+        },
         "P-HISTSRC": {
           "id": "P-HISTSRC",
           "type": "process",
